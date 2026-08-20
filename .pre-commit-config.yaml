@@ -1,0 +1,58 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-added-large-files
+      - id: check-merge-conflict
+      # Catches an accidentally committed key/token by content, not by filename.
+      - id: detect-private-key
+      - id: check-yaml
+
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.10.0.1
+    hooks:
+      - id: shellcheck
+        args: ["--severity=warning"]
+
+  - repo: local
+    hooks:
+      # Every merge publishes v<version>, so the version has to move whenever
+      # the released binary changes. Bumps Cargo.toml and Cargo.lock.
+      - id: bump-version
+        name: Bump patch version
+        entry: python3 scripts/bump_version.py
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: cargo-fmt
+        name: cargo fmt --check
+        entry: cargo fmt --check
+        language: system
+        files: \.rs$
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: cargo clippy --all-targets --all-features --locked -- -D warnings
+        language: system
+        files: ^(src/|tests/|Cargo\.(toml|lock)$|rust-toolchain\.toml$)
+        pass_filenames: false
+
+      - id: cargo-test
+        name: cargo test
+        entry: cargo test --locked
+        language: system
+        files: ^(src/|tests/|Cargo\.(toml|lock)$|rust-toolchain\.toml$)
+        pass_filenames: false
+
+      # The strict profile is the primary oracle: no unsafe, no unwrap/expect
+      # outside tests, no `as` casts, effects only in capability modules.
+      - id: strictrs-check
+        name: strictrs check
+        entry: strictrs check .
+        language: system
+        files: ^(src/|tests/|Cargo\.(toml|lock)$|rust-toolchain\.toml$)
+        pass_filenames: false
