@@ -77,6 +77,11 @@ manager.
 - **Never report a last-use verdict without evidence for it.** `noatime`
   freezes access times; the column is disabled rather than filled with stale
   dates. An access time at install time means *never used*, not *used then*.
+- **Home-directory evidence is not gated on the install date.** `%INSTALLDATE%`
+  moves on every *upgrade*, so on a rolling release it is routinely newer than
+  the last time the user ran the program; gating on it discards the only usable
+  signal for every recently upgraded package. Pacman never writes to a user's
+  home directory, so there is nothing the gate would have protected against.
 - **Judge a package by the strongest tier it ships, and do not mix tiers.**
   Executables, then libraries, then installed data. Narrowing the witness set
   to binaries and libraries left every font, icon theme and TeX package — the

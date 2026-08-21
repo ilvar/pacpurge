@@ -111,6 +111,18 @@ pub enum UsageEvidence {
         /// The file that produced that timestamp, relative to the root.
         witness: String,
     },
+    /// The application wrote state in the user's home directory.
+    ///
+    /// Independent of access times entirely, so this is the only evidence
+    /// available on a `noatime` filesystem — and it is stronger evidence than
+    /// an access time even where both exist, because a program writing its own
+    /// configuration back means a person ran it, not that something read it.
+    UsedFromHome {
+        /// Unix timestamp of the most recent write.
+        at: i64,
+        /// Absolute path that carried the timestamp.
+        witness: String,
+    },
     /// Witness files exist, but none has been read since install time.
     NeverSinceInstall {
         /// Most recent access seen, which tracks installation.
@@ -125,10 +137,11 @@ pub enum UsageEvidence {
 }
 
 impl UsageEvidence {
-    /// The access timestamp, when one was observed.
+    /// The observed timestamp, when there was one.
     pub fn timestamp(&self) -> Option<i64> {
         match self {
             UsageEvidence::Used { at, witness: _ } => Some(*at),
+            UsageEvidence::UsedFromHome { at, witness: _ } => Some(*at),
             UsageEvidence::NeverSinceInstall { at } => Some(*at),
             UsageEvidence::NoWitness | UsageEvidence::AtimeDisabled | UsageEvidence::NotProbed => {
                 None
@@ -139,7 +152,8 @@ impl UsageEvidence {
     /// Whether the evidence positively shows the package being used.
     pub fn is_used(&self) -> bool {
         match self {
-            UsageEvidence::Used { at: _, witness: _ } => true,
+            UsageEvidence::Used { at: _, witness: _ }
+            | UsageEvidence::UsedFromHome { at: _, witness: _ } => true,
             UsageEvidence::NeverSinceInstall { at: _ }
             | UsageEvidence::NoWitness
             | UsageEvidence::AtimeDisabled
@@ -152,6 +166,7 @@ impl UsageEvidence {
         match self {
             UsageEvidence::NeverSinceInstall { at: _ } => true,
             UsageEvidence::Used { at: _, witness: _ }
+            | UsageEvidence::UsedFromHome { at: _, witness: _ }
             | UsageEvidence::NoWitness
             | UsageEvidence::AtimeDisabled
             | UsageEvidence::NotProbed => false,

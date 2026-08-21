@@ -3,6 +3,8 @@
 //! These modes exist so the analysis is scriptable and so the tool can be
 //! tested end-to-end against a fixture root without driving a terminal.
 
+use std::collections::BTreeMap;
+
 use serde::Serialize;
 
 use crate::filter::{self, View};
@@ -137,6 +139,9 @@ pub fn list(inventory: &Inventory, view: &View, limit: usize) -> String {
 fn usage_cell(usage: &UsageEvidence, inventory: &Inventory) -> String {
     match usage {
         UsageEvidence::Used { at, witness: _ } => format::age(inventory.scanned_at, Some(*at)),
+        UsageEvidence::UsedFromHome { at, witness: _ } => {
+            format!("~{}", format::age(inventory.scanned_at, Some(*at)))
+        }
         UsageEvidence::NeverSinceInstall { at: _ } => "never".to_owned(),
         UsageEvidence::NoWitness => "n/a".to_owned(),
         UsageEvidence::AtimeDisabled => "off".to_owned(),
@@ -188,6 +193,88 @@ pub fn clean(inventory: &Inventory) -> String {
 
     for warning in &inventory.warnings {
         output.push_str(&format!("warning: {warning}\n"));
+    }
+
+    output
+}
+
+/// Explain what the last-use probe was able to see.
+///
+/// Exists because "the column is empty" has several possible causes that look
+/// identical from the outside: a `noatime` mount, a package that ships nothing
+/// worth stat-ing, or a probe that was bounded away. Guessing between them
+/// from a screenshot is no way to debug a tool.
+pub fn diagnose(inventory: &Inventory) -> String {
+    let mut output = String::new();
+
+    output.push_str("LAST-USE DIAGNOSIS\n\n");
+    output.push_str(&format!(
+        "  access times     {:?}\n                   {}\n",
+        inventory.atime_support,
+        inventory.atime_support.caveat()
+    ));
+    output.push_str(&format!(
+        "  packages         {}\n  probed           {}\n\n",
+        inventory.entries.len(),
+        inventory.probed
+    ));
+
+    let mut counts: BTreeMap<&str, (usize, u64)> = BTreeMap::new();
+    for entry in &inventory.entries {
+        let label = match &entry.facts.usage {
+            UsageEvidence::Used { at: _, witness: _ } => "dated from a file's access time",
+            UsageEvidence::UsedFromHome { at: _, witness: _ } => "dated from home-directory state",
+            UsageEvidence::NeverSinceInstall { at: _ } => "not read since it was installed",
+            UsageEvidence::NoWitness => "ships nothing worth checking",
+            UsageEvidence::AtimeDisabled => "no evidence available (access times frozen)",
+            UsageEvidence::NotProbed => "not probed (raise --top)",
+        };
+        let slot = counts.entry(label).or_insert((0, 0));
+        slot.0 = slot.0.saturating_add(1);
+        slot.1 = slot.1.saturating_add(entry.package.size);
+    }
+
+    output.push_str("  WHERE EACH VERDICT CAME FROM\n");
+    for (label, (count, bytes)) in &counts {
+        output.push_str(&format!(
+            "  {count:>6}  {:>10}  {label}\n",
+            format::bytes(*bytes)
+        ));
+    }
+
+    let dated: Vec<&crate::model::Entry> = inventory
+        .entries
+        .iter()
+        .filter(|entry| entry.facts.usage.is_used())
+        .collect();
+
+    if !dated.is_empty() {
+        output.push_str("\n  EXAMPLES OF WHAT IT FOUND\n");
+        for entry in dated.iter().take(5) {
+            let (source, witness) = match &entry.facts.usage {
+                UsageEvidence::Used { at: _, witness } => ("access time", format!("/{witness}")),
+                UsageEvidence::UsedFromHome { at: _, witness } => ("home state", witness.clone()),
+                UsageEvidence::NeverSinceInstall { at: _ }
+                | UsageEvidence::NoWitness
+                | UsageEvidence::AtimeDisabled
+                | UsageEvidence::NotProbed => continue,
+            };
+            output.push_str(&format!(
+                "  {:<24} {:>8}  {source:<12} {witness}\n",
+                format::truncate(&entry.package.name, 24),
+                format::age(inventory.scanned_at, entry.facts.usage.timestamp()),
+            ));
+        }
+    }
+
+    if !inventory.atime_support.is_meaningful() {
+        output.push_str(
+            "\n  WHY THE COLUMN IS MOSTLY EMPTY\n               The filesystem holding /usr is mounted noatime, which stops the kernel recording\n               when a file was read. Package files therefore carry the timestamp of the last\n               upgrade and nothing else, so pacpurge will not pretend that is a last-use date.\n\n               Packages that write state under your home directory are still dated, because\n               modification times are unaffected. To date the rest, drop `noatime` from the root\n               filesystem's options in /etc/fstab (relatime is the default and costs one write\n               per file per day), then remount:\n\n                   sudo mount -o remount,relatime /\n",
+        );
+    }
+
+    for warning in &inventory.warnings {
+        output.push_str(&format!("\n  warning: {warning}\n"));
     }
 
     output

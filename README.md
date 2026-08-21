@@ -44,6 +44,20 @@ Documentation is the one thing excluded outright. An indexer reading a man
 page says nothing about whether you use the software, so a package that ships
 *only* documentation honestly reports `n/a` rather than guessing.
 
+**Where access times are frozen, it looks somewhere else.** A filesystem
+mounted `noatime` never records reads, so every package file carries the
+timestamp of its last upgrade and nothing more. pacpurge will not pass that
+off as a last-use date — but it does fall back to what the program wrote under
+your home directory: `~/.config/vlc`, `~/.local/share/gimp`, and so on.
+Modification times are unaffected by mount options, and a program writing its
+own configuration back is *stronger* evidence than a read, because it means a
+person ran it rather than something having touched a file it owns. That covers
+applications that keep state; libraries, fonts and stateless CLI tools still
+need access times.
+
+Unsure what your system can see? `pacpurge --diagnose` prints the mount
+options, a breakdown of where every verdict came from, and what to change.
+
 Two things it refuses to fudge:
 
 - Package extraction stamps an access time at install. A package that has
@@ -147,6 +161,7 @@ runs a command that requires it.
 pacpurge                       # the interactive interface
 pacpurge --list                # print the package table and exit
 pacpurge --clean               # print the reclaim targets and exit
+pacpurge --diagnose            # explain what the last-use probe can see here
 pacpurge --json | jq .summary  # the whole analysis as one JSON document
 ```
 
@@ -235,6 +250,12 @@ See [`AGENTS.md`](AGENTS.md) for the project-specific rules.
 
 ## Limitations
 
+- **`noatime` costs you most of the last-use column.** The home-directory
+  fallback covers applications that keep per-user state, which is a minority of
+  an installed system. `relatime` — the kernel default — writes an inode at
+  most once per file per day, which is negligible even on an SSD, and
+  `lazytime` alongside it defers those writes further. `--diagnose` prints the
+  remount command.
 - **Access times are a proxy, not a log.** A library loaded by something else
   reads as used even if you never invoked the package's own binary. The signal
   is strong in the negative direction — `never` is reliable — and weaker in

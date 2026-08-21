@@ -119,6 +119,40 @@ pub fn witnesses(files: &[String], budget: usize) -> Vec<&str> {
         .collect()
 }
 
+/// Directories under `$HOME` where applications keep per-user state.
+///
+/// A program that runs writes here: a window position, a recent-files list, a
+/// cache index. Those writes carry modification times, which no mount option
+/// suppresses, so this is the only usable evidence on a `noatime` filesystem.
+pub const HOME_STATE_DIRS: [&str; 4] = [".config", ".local/share", ".local/state", ".cache"];
+
+/// Names a package's per-user state might be filed under.
+///
+/// The package name itself, plus the base name of every executable it ships:
+/// the `vlc` package writes `~/.config/vlc`, but plenty of packages are named
+/// for their project and write under the name of their binary.
+pub fn home_state_names(package: &str, files: &[String]) -> Vec<String> {
+    let mut names = vec![package.to_lowercase()];
+
+    for path in files {
+        let Some(rest) = path
+            .strip_prefix("usr/bin/")
+            .or_else(|| path.strip_prefix("usr/local/bin/"))
+        else {
+            continue;
+        };
+        if rest.contains('/') {
+            continue;
+        }
+        let name = rest.to_lowercase();
+        if !name.is_empty() && !names.contains(&name) {
+            names.push(name);
+        }
+    }
+
+    names
+}
+
 /// An access time observed for one witness file.
 pub struct Observation<'a> {
     /// Root-relative path that was stat-ed.
@@ -134,8 +168,57 @@ pub struct Observation<'a> {
 /// minutes either side of that date still means "untouched since install".
 const INSTALL_GRACE: i64 = 900;
 
-/// Turn observed access times into a verdict.
+/// Something the package wrote in the user's home directory.
+pub struct HomeActivity {
+    /// Absolute path that carried the timestamp.
+    pub path: String,
+    /// Its modification time, in Unix seconds.
+    pub mtime: i64,
+}
+
+/// Turn the observed evidence into a verdict.
+///
+/// Home-directory activity is not gated on the install date, unlike an access
+/// time. Pacman never writes to a user's home directory, so a write there was
+/// the user running the program — and `%INSTALLDATE%` moves on every *upgrade*,
+/// so gating on it would throw away good evidence for every package that has
+/// been updated recently, which on a rolling release is most of them.
 pub fn evaluate(
+    observations: &[Observation<'_>],
+    home: Option<&HomeActivity>,
+    install_date: Option<i64>,
+    support: AtimeSupport,
+) -> UsageEvidence {
+    let from_atime = evaluate_atime(observations, install_date, support);
+
+    let Some(home) = home else {
+        return from_atime;
+    };
+
+    let from_home = || UsageEvidence::UsedFromHome {
+        at: home.mtime,
+        witness: home.path.clone(),
+    };
+
+    match &from_atime {
+        // A read more recent than the home write is the better timestamp.
+        UsageEvidence::Used { at, witness: _ } if *at >= home.mtime => from_atime,
+        UsageEvidence::Used { at: _, witness: _ } => from_home(),
+        // Access times are frozen, so the home write is all there is.
+        UsageEvidence::AtimeDisabled => from_home(),
+        // "Untouched since install" is a definite verdict where access times
+        // work, but a later home write contradicts it outright.
+        UsageEvidence::NeverSinceInstall { at } if home.mtime > *at => from_home(),
+        UsageEvidence::NeverSinceInstall { at: _ } => from_atime,
+        // Nothing worth stat-ing, but the program still left state behind.
+        UsageEvidence::NoWitness => from_home(),
+        UsageEvidence::NotProbed => from_atime,
+        UsageEvidence::UsedFromHome { at: _, witness: _ } => from_atime,
+    }
+}
+
+/// The verdict from access times alone.
+fn evaluate_atime(
     observations: &[Observation<'_>],
     install_date: Option<i64>,
     support: AtimeSupport,
@@ -229,7 +312,10 @@ fn has_option(options: &str, needle: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{atime_support, evaluate, is_witness, witness_tier, witnesses, Observation};
+    use super::{
+        atime_support, evaluate, home_state_names, is_witness, witness_tier, witnesses,
+        HomeActivity, Observation,
+    };
     use crate::model::{AtimeSupport, UsageEvidence};
 
     #[test]
@@ -320,7 +406,7 @@ mod tests {
             atime: 2_000,
         }];
         assert_eq!(
-            evaluate(&observations, Some(1_000), AtimeSupport::Relatime),
+            evaluate(&observations, None, Some(1_000), AtimeSupport::Relatime),
             UsageEvidence::Used {
                 at: 2_000,
                 witness: "usr/bin/rg".to_owned()
@@ -335,7 +421,7 @@ mod tests {
             atime: 1_010,
         }];
         assert_eq!(
-            evaluate(&observations, Some(1_000), AtimeSupport::Relatime),
+            evaluate(&observations, None, Some(1_000), AtimeSupport::Relatime),
             UsageEvidence::NeverSinceInstall { at: 1_010 }
         );
     }
@@ -353,7 +439,7 @@ mod tests {
             },
         ];
         assert_eq!(
-            evaluate(&observations, Some(1_000), AtimeSupport::Relatime),
+            evaluate(&observations, None, Some(1_000), AtimeSupport::Relatime),
             UsageEvidence::Used {
                 at: 9_000,
                 witness: "usr/bin/foo".to_owned()
@@ -364,7 +450,7 @@ mod tests {
     #[test]
     fn no_witnesses_is_reported_as_such() {
         assert_eq!(
-            evaluate(&[], Some(1_000), AtimeSupport::Relatime),
+            evaluate(&[], None, Some(1_000), AtimeSupport::Relatime),
             UsageEvidence::NoWitness
         );
     }
@@ -376,7 +462,180 @@ mod tests {
             atime: 9_999,
         }];
         assert_eq!(
-            evaluate(&observations, Some(1_000), AtimeSupport::Disabled),
+            evaluate(&observations, None, Some(1_000), AtimeSupport::Disabled),
+            UsageEvidence::AtimeDisabled
+        );
+    }
+
+    #[test]
+    fn home_state_names_cover_the_package_and_its_binaries() {
+        let files = vec![
+            "usr/bin/vlc".to_owned(),
+            "usr/bin/qvlc".to_owned(),
+            "usr/lib/vlc/plugin.so".to_owned(),
+            "usr/bin/nested/deep".to_owned(),
+        ];
+        assert_eq!(
+            home_state_names("VLC", &files),
+            vec!["vlc".to_owned(), "qvlc".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_home_write_dates_a_package_that_atime_cannot() {
+        // The noatime case: access times say nothing, but the application
+        // wrote its own configuration back, which no mount option suppresses.
+        let home = HomeActivity {
+            path: "/home/me/.config/vlc/vlcrc".to_owned(),
+            mtime: 9_000,
+        };
+        assert_eq!(
+            evaluate(&[], Some(&home), Some(1_000), AtimeSupport::Disabled),
+            UsageEvidence::UsedFromHome {
+                at: 9_000,
+                witness: "/home/me/.config/vlc/vlcrc".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn a_home_write_outranks_a_stale_access_time() {
+        let observations = vec![Observation {
+            path: "usr/bin/vlc",
+            atime: 2_000,
+        }];
+        let home = HomeActivity {
+            path: "/home/me/.config/vlc/vlcrc".to_owned(),
+            mtime: 9_000,
+        };
+        assert_eq!(
+            evaluate(
+                &observations,
+                Some(&home),
+                Some(1_000),
+                AtimeSupport::Relatime
+            ),
+            UsageEvidence::UsedFromHome {
+                at: 9_000,
+                witness: "/home/me/.config/vlc/vlcrc".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn a_newer_access_time_still_wins() {
+        let observations = vec![Observation {
+            path: "usr/bin/vlc",
+            atime: 9_000,
+        }];
+        let home = HomeActivity {
+            path: "/home/me/.config/vlc/vlcrc".to_owned(),
+            mtime: 2_000,
+        };
+        assert_eq!(
+            evaluate(
+                &observations,
+                Some(&home),
+                Some(1_000),
+                AtimeSupport::Relatime
+            ),
+            UsageEvidence::Used {
+                at: 9_000,
+                witness: "usr/bin/vlc".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn home_evidence_is_not_gated_on_the_install_date() {
+        // %INSTALLDATE% moves on every upgrade, so on a rolling release it is
+        // routinely newer than the last time the user ran the program. Gating
+        // home evidence on it would discard the only usable signal for every
+        // recently upgraded package. Pacman does not write to a user's home
+        // directory, so there is nothing to guard against.
+        let home = HomeActivity {
+            path: "/home/me/.config/gimp".to_owned(),
+            mtime: 500,
+        };
+        assert_eq!(
+            evaluate(&[], Some(&home), Some(1_000), AtimeSupport::Disabled),
+            UsageEvidence::UsedFromHome {
+                at: 500,
+                witness: "/home/me/.config/gimp".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn a_definite_never_verdict_survives_older_home_state() {
+        // Where access times work, "untouched since install" is real evidence.
+        // Home state written before that does not contradict it.
+        let observations = vec![Observation {
+            path: "usr/bin/foo",
+            atime: 1_005,
+        }];
+        let home = HomeActivity {
+            path: "/home/me/.config/foo".to_owned(),
+            mtime: 500,
+        };
+        assert_eq!(
+            evaluate(
+                &observations,
+                Some(&home),
+                Some(1_000),
+                AtimeSupport::Relatime
+            ),
+            UsageEvidence::NeverSinceInstall { at: 1_005 }
+        );
+    }
+
+    #[test]
+    fn a_home_write_after_install_overturns_a_never_verdict() {
+        let observations = vec![Observation {
+            path: "usr/bin/foo",
+            atime: 1_005,
+        }];
+        let home = HomeActivity {
+            path: "/home/me/.config/foo".to_owned(),
+            mtime: 5_000,
+        };
+        assert_eq!(
+            evaluate(
+                &observations,
+                Some(&home),
+                Some(1_000),
+                AtimeSupport::Relatime
+            ),
+            UsageEvidence::UsedFromHome {
+                at: 5_000,
+                witness: "/home/me/.config/foo".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn home_state_dates_a_package_with_nothing_worth_stat_ing() {
+        let home = HomeActivity {
+            path: "/home/me/.config/docs".to_owned(),
+            mtime: 5_000,
+        };
+        assert_eq!(
+            evaluate(&[], Some(&home), Some(1_000), AtimeSupport::Relatime),
+            UsageEvidence::UsedFromHome {
+                at: 5_000,
+                witness: "/home/me/.config/docs".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn without_home_evidence_the_noatime_verdict_is_unchanged() {
+        let observations = vec![Observation {
+            path: "usr/bin/vlc",
+            atime: 9_999,
+        }];
+        assert_eq!(
+            evaluate(&observations, None, Some(1_000), AtimeSupport::Disabled),
             UsageEvidence::AtimeDisabled
         );
     }

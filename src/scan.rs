@@ -76,6 +76,8 @@ pub struct Config {
     pub measure_directories: bool,
     /// Maximum directory entries any single walk may visit.
     pub walk_budget: usize,
+    /// Maximum entries to visit when dating one package's home state.
+    pub home_budget: usize,
 }
 
 impl Default for Config {
@@ -90,6 +92,7 @@ impl Default for Config {
             probe_usage: true,
             measure_directories: true,
             walk_budget: 400_000,
+            home_budget: 400,
         }
     }
 }
@@ -218,19 +221,35 @@ pub fn scan(config: &Config) -> Result<Inventory, Error> {
     };
 
     let probe_list = choose_probe_targets(&packages, &graph, &origins, config);
+    let index = config
+        .home
+        .as_ref()
+        .map(|home| home_index(home))
+        .unwrap_or_default();
+
     let mut usages: BTreeMap<usize, UsageEvidence> = BTreeMap::new();
-    if config.probe_usage && atime_support.is_meaningful() {
+    if config.probe_usage {
         for position in &probe_list {
             let Some(package) = packages.get(*position) else {
                 continue;
             };
-            usages.insert(*position, probe_package(package, config, atime_support));
+            usages.insert(
+                *position,
+                probe_package(package, &index, config, atime_support),
+            );
         }
-    } else if !atime_support.is_meaningful() {
-        warnings.push(
-            "access times are disabled on the filesystem holding /usr, so last-use data is unavailable"
-                .to_owned(),
-        );
+    }
+
+    if !atime_support.is_meaningful() {
+        let recovered = usages
+            .values()
+            .filter(|evidence| evidence.is_used())
+            .count();
+        warnings.push(format!(
+            "access times are frozen on the filesystem holding /usr (noatime), so most packages \
+             cannot be dated. {recovered} were dated from what they wrote under your home \
+             directory instead. Mounting with relatime would date the rest."
+        ));
     }
 
     let mut inventory_entries: Vec<Entry> = Vec::new();
@@ -393,8 +412,95 @@ fn choose_probe_targets(
     chosen.into_iter().collect()
 }
 
+/// An index of the per-user state directories present under `$HOME`.
+///
+/// Built once and shared across every package, so establishing whether a
+/// package has home state is a map lookup rather than a stat storm.
+type HomeIndex = BTreeMap<String, Vec<PathBuf>>;
+
+/// List the per-user state directories that exist under `home`.
+fn home_index(home: &Path) -> HomeIndex {
+    let mut index: HomeIndex = BTreeMap::new();
+
+    for relative in usage::HOME_STATE_DIRS {
+        let Ok(entries) = capability::list_dir(&home.join(relative)) else {
+            continue;
+        };
+        for entry in entries {
+            if !entry.is_dir {
+                continue;
+            }
+            index
+                .entry(entry.name.to_lowercase())
+                .or_default()
+                .push(entry.path);
+        }
+    }
+
+    // Legacy dotted directories, e.g. `~/.vlc`, live directly in the home
+    // directory rather than under the XDG paths.
+    if let Ok(entries) = capability::list_dir(home) {
+        for entry in entries {
+            if !entry.is_dir {
+                continue;
+            }
+            let Some(name) = entry.name.strip_prefix('.') else {
+                continue;
+            };
+            if name.is_empty() || name == "config" || name == "cache" || name == "local" {
+                continue;
+            }
+            index
+                .entry(name.to_lowercase())
+                .or_default()
+                .push(entry.path);
+        }
+    }
+
+    index
+}
+
+/// The most recent write this package made under the user's home directory.
+fn home_activity(
+    package: &Package,
+    files: &[String],
+    index: &HomeIndex,
+    config: &Config,
+) -> Option<usage::HomeActivity> {
+    let mut best: Option<usage::HomeActivity> = None;
+
+    for name in usage::home_state_names(&package.name, files) {
+        let Some(directories) = index.get(&name) else {
+            continue;
+        };
+        for directory in directories {
+            let Some((mtime, path)) = capability::newest_mtime(directory, config.home_budget)
+            else {
+                continue;
+            };
+            let newer = match &best {
+                Some(current) => mtime > current.mtime,
+                None => true,
+            };
+            if newer {
+                best = Some(usage::HomeActivity {
+                    path: path.to_string_lossy().into_owned(),
+                    mtime,
+                });
+            }
+        }
+    }
+
+    best
+}
+
 /// Stat a package's witness files and judge when it was last used.
-fn probe_package(package: &Package, config: &Config, support: AtimeSupport) -> UsageEvidence {
+fn probe_package(
+    package: &Package,
+    index: &HomeIndex,
+    config: &Config,
+    support: AtimeSupport,
+) -> UsageEvidence {
     let Ok(text) = capability::read_text(&package.db_dir.join("files")) else {
         return UsageEvidence::NoWitness;
     };
@@ -412,7 +518,8 @@ fn probe_package(package: &Package, config: &Config, support: AtimeSupport) -> U
         })
         .collect();
 
-    usage::evaluate(&observations, package.install_date, support)
+    let home = home_activity(package, &files, index, config);
+    usage::evaluate(&observations, home.as_ref(), package.install_date, support)
 }
 
 /// Build the list of non-package cleanup targets.
