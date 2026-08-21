@@ -41,6 +41,27 @@ fn inventory() -> Inventory {
         },
         Entry {
             package: Package {
+                name: "toy-plugin".to_owned(),
+                version: "1-1".to_owned(),
+                size: 1_000_000,
+                install_date: Some(0),
+                reason: InstallReason::Dependency,
+                description: "an add-on for the abandoned toy".to_owned(),
+                depends: vec!["abandoned-toy".to_owned()],
+                ..Package::default()
+            },
+            facts: Facts {
+                required_by: Vec::new(),
+                optional_for: Vec::new(),
+                origin: Origin::Foreign,
+                usage: UsageEvidence::NotProbed,
+                reclaimable: 1_000_000,
+                frees: Vec::new(),
+                protected: false,
+            },
+        },
+        Entry {
+            package: Package {
                 name: "glibc".to_owned(),
                 version: "2.39-1".to_owned(),
                 size: 50_000_000,
@@ -177,12 +198,15 @@ fn the_reclaim_tab_draws_its_targets_and_command() {
 #[test]
 fn the_confirmation_modal_shows_the_exact_command() {
     let mut app = app();
+    // `toy-plugin` is a leaf, so the review goes straight to a confirmation
+    // rather than first offering to widen the selection.
+    app.handle(Intent::Last);
     app.handle(Intent::ToggleSelect);
     app.handle(Intent::Review);
     let rendered = screen(&mut app, 140, 30);
 
     assert!(rendered.contains("Review removal"), "{rendered}");
-    assert!(rendered.contains("pacman -Rns abandoned-toy"), "{rendered}");
+    assert!(rendered.contains("pacman -Rns toy-plugin"), "{rendered}");
     assert!(rendered.contains("y to run"), "{rendered}");
 }
 
@@ -206,7 +230,7 @@ fn the_search_field_shows_what_is_being_typed() {
     app.handle(Intent::SearchInput('y'));
     let rendered = screen(&mut app, 140, 30);
 
-    assert!(rendered.contains("search: toy"), "{rendered}");
+    assert!(rendered.contains("name: toy"), "{rendered}");
     assert!(rendered.contains("abandoned-toy"), "{rendered}");
     assert!(!rendered.contains("2.39-1"), "{rendered}");
 }
@@ -284,4 +308,66 @@ fn no_column_truncates_the_value_it_holds() {
     assert!(row.contains("1.0y"), "{row}");
     assert!(row.contains("aur/local"), "{row}");
     assert!(row.contains("orphan"), "{row}");
+}
+
+#[test]
+fn the_offer_modal_names_the_dependants_and_the_new_total() {
+    let mut app = app();
+    // `toy-plugin` depends on `abandoned-toy`, so marking the toy alone
+    // strands it and the review should propose marking both.
+    app.handle(Intent::ToggleSelect);
+    app.handle(Intent::Review);
+    let rendered = screen(&mut app, 140, 30);
+
+    assert!(
+        rendered.contains("Mark what depends on this too?"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("toy-plugin"), "{rendered}");
+    assert!(rendered.contains("y to mark them too"), "{rendered}");
+    assert!(rendered.contains("287.0 MiB"), "{rendered}");
+}
+
+#[test]
+fn accepting_the_offer_draws_the_confirmation_with_both_packages() {
+    let mut app = app();
+    app.handle(Intent::ToggleSelect);
+    app.handle(Intent::Review);
+    app.handle(Intent::Accept);
+    let rendered = screen(&mut app, 140, 30);
+
+    assert!(rendered.contains("Review removal"), "{rendered}");
+    assert!(
+        rendered.contains("pacman -Rns abandoned-toy toy-plugin"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn the_search_field_names_what_it_is_matching() {
+    let mut app = app();
+    app.handle(Intent::StartSearch);
+    app.handle(Intent::SearchInput('t'));
+    assert!(screen(&mut app, 140, 30).contains("name: t"));
+
+    app.handle(Intent::SearchCommit);
+    app.handle(Intent::ToggleDescriptions);
+    app.handle(Intent::StartSearch);
+    let rendered = screen(&mut app, 140, 30);
+    assert!(rendered.contains("name+description: t"), "{rendered}");
+}
+
+#[test]
+fn a_name_search_ignores_a_description_only_match() {
+    let mut app = app();
+    app.handle(Intent::StartSearch);
+    for character in "add-on".chars() {
+        app.handle(Intent::SearchInput(character));
+    }
+    // "add-on" appears only in toy-plugin's description.
+    assert_eq!(app.order.len(), 0);
+
+    app.handle(Intent::ToggleDescriptions);
+    assert_eq!(app.order.len(), 1);
+    assert!(screen(&mut app, 140, 30).contains("toy-plugin"));
 }

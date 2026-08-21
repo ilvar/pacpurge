@@ -143,6 +143,11 @@ pacpurge never deletes a package itself. Removals are handed to
 `pacman -Rns`, which applies its own dependency checks and its own
 confirmation prompt.
 
+SEARCH AND FILTERS
+  Inside the interface, `/` filters by package name. `D` widens the search to
+  descriptions as well. Filters compose with AND: `a` then `n` lists AUR
+  packages that have not been read since they were installed.
+
 LAST-USE DATA
   Package files carry an access time, which Arch updates at most once a day
   under the default `relatime` mount option. That is precise enough to tell

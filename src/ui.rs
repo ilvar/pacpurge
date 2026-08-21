@@ -589,12 +589,16 @@ fn render_status(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
     if app.searching {
         spans.push(Span::styled(
-            "search: ",
+            format!("{}: ", app.view.search_scope()),
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::styled(
             format!("{}▏", app.view.query),
             Style::default().add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            "   D to search descriptions too",
+            Style::default().fg(MUTED),
         ));
     } else {
         for toggle in TOGGLES {
@@ -612,8 +616,13 @@ fn render_status(frame: &mut Frame<'_>, app: &App, area: Rect) {
         }
 
         if !app.view.query.is_empty() {
+            let scope = if app.view.match_descriptions {
+                "+desc"
+            } else {
+                ""
+            };
             spans.push(Span::styled(
-                format!(" /{} ", app.view.query),
+                format!(" /{}{scope} ", app.view.query),
                 Style::default().fg(Color::Black).bg(WARN),
             ));
             spans.push(Span::raw(" "));
@@ -666,6 +675,22 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 rendered,
                 true,
                 "any key to close",
+            );
+        }
+        Overlay::Offer {
+            title,
+            lines,
+            add: _,
+        } => {
+            let rendered: Vec<Line<'_>> =
+                lines.iter().map(|line| Line::from(line.clone())).collect();
+            modal(
+                frame,
+                area,
+                &format!(" {title} "),
+                rendered,
+                false,
+                "y to mark them too   Esc to leave the selection alone",
             );
         }
         Overlay::Confirm {
@@ -755,7 +780,8 @@ FILTER    o                 orphans: installed as a dependency, needed by nothin
           n                 never read since installation
           u                 not read within the staleness window
           p                 hide packages the base system depends on
-          /                 search names and descriptions
+          /                 search package names
+          D                 search descriptions as well as names
           Esc               clear every filter
 
 SORT      s                 next column          S   reverse

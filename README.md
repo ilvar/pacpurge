@@ -81,8 +81,13 @@ Beyond that:
 - **Protected packages.** Everything the `base` group depends on, plus the
   kernel, bootloader, `sudo` and `pacman`, is marked and cannot be selected by
   a normal keystroke. `P` overrides it deliberately.
-- **Breakage is refused, not worked around.** If the selection would strand an
-  installed package, pacpurge says which one and declines to build a command.
+- **Breakage is offered a fix, not worked around.** If the selection would
+  strand installed packages, pacpurge names them and offers to mark them too —
+  the whole transitive closure at once, with the new total, so you are not
+  discovering it one refusal at a time. Accepting takes you straight to the
+  confirmation. If that closure reaches the base system, the offer is withheld
+  and pacpurge says so instead: uninstalling half the machine should not be one
+  keystroke away.
 - **`--dry-run`** prints what would run and executes nothing.
 - Reported sizes are truncated, never rounded up, so a promised figure is
   never larger than the space you get back.
@@ -138,7 +143,8 @@ Useful options:
 | `Enter` | review and run what is marked |
 | `o` `a` `e` `n` `u` | filter: orphans, AUR, explicit, never-used, stale |
 | `p` | hide packages the base system depends on |
-| `/` | search names and descriptions |
+| `/` | filter by package name |
+| `D` | search descriptions as well as names |
 | `Esc` | clear every filter |
 | `s` `S` `1`–`6` | sort: next column, reverse, or pick one |
 | `r` | re-scan |
@@ -146,6 +152,11 @@ Useful options:
 
 Filters compose with AND. `a` then `n` is the list worth looking at first:
 AUR packages you installed and never opened.
+
+`/` matches package names, because searching `lib` should find the packages
+*called* `lib…` rather than the several hundred whose description happens to
+mention the word. `D` widens it to descriptions when that is what you want,
+and the search field shows which it is currently matching.
 
 ## How it works
 

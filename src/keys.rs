@@ -65,6 +65,7 @@ pub fn intent(key: KeyEvent, typing: bool) -> Option<Intent> {
         KeyCode::Char('n') => Some(Intent::Filter(Toggle::NeverUsed)),
         KeyCode::Char('u') => Some(Intent::Filter(Toggle::Stale)),
         KeyCode::Char('p') => Some(Intent::ToggleProtected),
+        KeyCode::Char('D') => Some(Intent::ToggleDescriptions),
 
         KeyCode::Char('s') => Some(Intent::CycleSort),
         KeyCode::Char('S') => Some(Intent::ReverseSort),
@@ -140,6 +141,25 @@ mod tests {
         let mut key = press(KeyCode::Char('q'));
         key.kind = KeyEventKind::Release;
         assert_eq!(intent(key, false), None);
+    }
+
+    #[test]
+    fn case_distinguishes_related_bindings() {
+        // `p` hides protected packages; `P` marks one anyway; `D` widens the
+        // search. Getting these confused would be destructive, so they are
+        // pinned.
+        assert_eq!(
+            intent(press(KeyCode::Char('p')), false),
+            Some(Intent::ToggleProtected)
+        );
+        assert_eq!(
+            intent(press(KeyCode::Char('P')), false),
+            Some(Intent::ForceSelect)
+        );
+        assert_eq!(
+            intent(press(KeyCode::Char('D')), false),
+            Some(Intent::ToggleDescriptions)
+        );
     }
 
     #[test]

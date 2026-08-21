@@ -83,6 +83,8 @@ pub enum Intent {
     Filter(Toggle),
     /// Show or hide protected packages.
     ToggleProtected,
+    /// Widen or narrow the search to package descriptions.
+    ToggleDescriptions,
     /// Move to the next sort column.
     CycleSort,
     /// Reverse the current sort.
@@ -145,6 +147,15 @@ pub enum Overlay {
         title: String,
         /// Body lines.
         lines: Vec<String>,
+    },
+    /// A proposal to widen the selection, which the user can accept.
+    Offer {
+        /// Modal title.
+        title: String,
+        /// Body lines.
+        lines: Vec<String>,
+        /// Positions to add to the selection on acceptance.
+        add: Vec<usize>,
     },
 }
 
@@ -279,92 +290,11 @@ impl App {
 
     /// Apply an intent.
     pub fn handle(&mut self, intent: Intent) -> Action {
-        if let Overlay::Confirm {
-            title: _,
-            lines: _,
-            steps,
-            danger: _,
-        } = &self.overlay
-        {
-            return match intent {
-                Intent::Accept => {
-                    let steps = steps.clone();
-                    let summary = self.describe(&steps);
-                    self.overlay = Overlay::None;
-                    if self.dry_run {
-                        self.status =
-                            "dry run: nothing was executed. The commands are printed above."
-                                .to_owned();
-                        Action::Run {
-                            steps: Vec::new(),
-                            summary,
-                        }
-                    } else {
-                        Action::Run { steps, summary }
-                    }
-                }
-                Intent::Quit | Intent::Cancel => {
-                    self.overlay = Overlay::None;
-                    "cancelled".clone_into(&mut self.status);
-                    Action::Redraw
-                }
-                Intent::NextTab
-                | Intent::PrevTab
-                | Intent::Up
-                | Intent::Down
-                | Intent::PageUp
-                | Intent::PageDown
-                | Intent::First
-                | Intent::Last
-                | Intent::ToggleSelect
-                | Intent::ForceSelect
-                | Intent::ClearSelection
-                | Intent::StartSearch
-                | Intent::SearchInput(_)
-                | Intent::SearchBackspace
-                | Intent::SearchCommit
-                | Intent::SearchCancel
-                | Intent::Filter(_)
-                | Intent::ToggleProtected
-                | Intent::CycleSort
-                | Intent::ReverseSort
-                | Intent::SortBy(_)
-                | Intent::Review
-                | Intent::Help
-                | Intent::Rescan => Action::Idle,
-            };
-        }
-
-        if matches!(self.overlay, Overlay::Help | Overlay::Notice { .. }) {
-            return match intent {
-                Intent::Quit | Intent::Cancel | Intent::Accept | Intent::Help => {
-                    self.overlay = Overlay::None;
-                    Action::Redraw
-                }
-                Intent::NextTab
-                | Intent::PrevTab
-                | Intent::Up
-                | Intent::Down
-                | Intent::PageUp
-                | Intent::PageDown
-                | Intent::First
-                | Intent::Last
-                | Intent::ToggleSelect
-                | Intent::ForceSelect
-                | Intent::ClearSelection
-                | Intent::StartSearch
-                | Intent::SearchInput(_)
-                | Intent::SearchBackspace
-                | Intent::SearchCommit
-                | Intent::SearchCancel
-                | Intent::Filter(_)
-                | Intent::ToggleProtected
-                | Intent::CycleSort
-                | Intent::ReverseSort
-                | Intent::SortBy(_)
-                | Intent::Review
-                | Intent::Rescan => Action::Idle,
-            };
+        // A modal owns the keyboard while it is open, so nothing leaks
+        // through to the table underneath.
+        if !matches!(self.overlay, Overlay::None) {
+            let overlay = std::mem::replace(&mut self.overlay, Overlay::None);
+            return self.handle_modal(overlay, modal_intent(intent));
         }
 
         match intent {
@@ -456,6 +386,16 @@ impl App {
                 };
                 Action::Redraw
             }
+            Intent::ToggleDescriptions => {
+                let widened = self.view.toggle_descriptions();
+                self.refresh();
+                self.status = if widened {
+                    "searching names and descriptions".to_owned()
+                } else {
+                    "searching names only".to_owned()
+                };
+                Action::Redraw
+            }
 
             Intent::CycleSort => {
                 let next = self.view.sort.next();
@@ -478,6 +418,83 @@ impl App {
 
             Intent::Review => self.review(),
             Intent::Accept => self.review(),
+        }
+    }
+
+    /// Apply an intent to whichever modal is open.
+    ///
+    /// The overlay is passed by value and re-installed on [`ModalIntent::Ignore`],
+    /// which keeps each arm free to consume the modal's contents.
+    fn handle_modal(&mut self, overlay: Overlay, intent: ModalIntent) -> Action {
+        match overlay {
+            Overlay::None => Action::Idle,
+
+            Overlay::Help => match intent {
+                ModalIntent::Accept | ModalIntent::Dismiss => Action::Redraw,
+                ModalIntent::Ignore => {
+                    self.overlay = Overlay::Help;
+                    Action::Idle
+                }
+            },
+
+            Overlay::Notice { title, lines } => match intent {
+                ModalIntent::Accept | ModalIntent::Dismiss => Action::Redraw,
+                ModalIntent::Ignore => {
+                    self.overlay = Overlay::Notice { title, lines };
+                    Action::Idle
+                }
+            },
+
+            Overlay::Confirm {
+                title,
+                lines,
+                steps,
+                danger,
+            } => match intent {
+                ModalIntent::Accept => {
+                    let summary = self.describe(&steps);
+                    if self.dry_run {
+                        "dry run: nothing was executed. The commands are printed above."
+                            .clone_into(&mut self.status);
+                        return Action::Run {
+                            steps: Vec::new(),
+                            summary,
+                        };
+                    }
+                    Action::Run { steps, summary }
+                }
+                ModalIntent::Dismiss => {
+                    "cancelled".clone_into(&mut self.status);
+                    Action::Redraw
+                }
+                ModalIntent::Ignore => {
+                    self.overlay = Overlay::Confirm {
+                        title,
+                        lines,
+                        steps,
+                        danger,
+                    };
+                    Action::Idle
+                }
+            },
+
+            Overlay::Offer { title, lines, add } => match intent {
+                ModalIntent::Accept => {
+                    let added = add.len();
+                    self.selection.extend(add);
+                    self.status = format!("marked {added} more package(s)");
+                    // Straight back to the review, which is now consistent.
+                    self.review_packages()
+                }
+                ModalIntent::Dismiss => {
+                    "left the selection as it was".clone_into(&mut self.status);
+                    Action::Redraw
+                }
+                ModalIntent::Ignore => {
+                    self.overlay = Overlay::Offer { title, lines, add };
+                    Action::Idle
+                }
+            },
         }
     }
 
@@ -588,20 +605,7 @@ impl App {
         }
 
         if !plan.broken.is_empty() {
-            self.overlay = Overlay::Notice {
-                title: "That would break installed software".to_owned(),
-                lines: vec![
-                    format!(
-                        "These packages still need what you marked: {}",
-                        plan.broken.join(", ")
-                    ),
-                    String::new(),
-                    "Mark them too, or unmark whatever they depend on. pacman would refuse this \
-                     transaction as it stands."
-                        .to_owned(),
-                ],
-            };
-            return Action::Redraw;
+            return self.offer_to_widen(&plan);
         }
 
         let mut lines = vec![
@@ -641,6 +645,78 @@ impl App {
                 command: plan.command(),
             }],
             danger: !plan.protected.is_empty(),
+        };
+        Action::Redraw
+    }
+
+    /// Propose marking everything that depends on the current selection.
+    ///
+    /// pacman would refuse the transaction as it stands, and the fix is nearly
+    /// always to remove the dependants too. Rather than leave the user to
+    /// discover the closure one refusal at a time, the whole set is offered at
+    /// once — unless it reaches the base system, in which case accepting a
+    /// prompt is far too casual a way to uninstall half the machine.
+    fn offer_to_widen(&mut self, plan: &Plan) -> Action {
+        let widening = plan::widen(&self.inventory, &self.selection);
+
+        if !widening.is_offerable() {
+            let mut lines = vec![format!(
+                "These packages still need what you marked: {}",
+                plan.broken.join(", ")
+            )];
+
+            if widening.protected.is_empty() {
+                lines.push(String::new());
+                lines.push(
+                    "Unmark whatever they depend on. pacman would refuse this transaction as it \
+                     stands."
+                        .to_owned(),
+                );
+            } else {
+                lines.push(String::new());
+                lines.push(format!(
+                    "Removing them in turn would reach {} package(s) the base system depends on, \
+                     including {}.",
+                    widening.protected.len(),
+                    preview(&widening.protected, 4)
+                ));
+                lines.push(String::new());
+                lines.push(
+                    "pacpurge will not offer to mark those for you. Unmark whatever they depend \
+                     on instead, or mark them one at a time with P if you really mean it."
+                        .to_owned(),
+                );
+            }
+
+            self.overlay = Overlay::Notice {
+                title: "That would break installed software".to_owned(),
+                lines,
+            };
+            return Action::Redraw;
+        }
+
+        let lines = vec![
+            format!(
+                "{} package(s) still need what you marked:",
+                widening.names.len()
+            ),
+            format!("  {}", preview(&widening.names, 12)),
+            String::new(),
+            "pacman would refuse the removal while they are installed. Marking them too makes it \
+             consistent."
+                .to_owned(),
+            String::new(),
+            format!(
+                "That brings the total to {}, up from {}.",
+                format::bytes(widening.bytes),
+                format::bytes(plan.bytes)
+            ),
+        ];
+
+        self.overlay = Overlay::Offer {
+            title: "Mark what depends on this too?".to_owned(),
+            lines,
+            add: widening.positions,
         };
         Action::Redraw
     }
@@ -736,6 +812,68 @@ impl App {
             names.join(" + "),
             format::bytes(bytes)
         )
+    }
+}
+
+/// Join names for a modal, trimming a long list to `limit` entries.
+fn preview(names: &[String], limit: usize) -> String {
+    if names.len() <= limit {
+        return names.join(" ");
+    }
+    let shown = names
+        .iter()
+        .take(limit)
+        .cloned()
+        .collect::<Vec<String>>()
+        .join(" ");
+    let rest = names.len().saturating_sub(limit);
+    format!("{shown} … and {rest} more")
+}
+
+/// How an intent is treated while a modal has focus.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ModalIntent {
+    /// Say yes to whatever the modal is asking.
+    Accept,
+    /// Close the modal without acting on it.
+    Dismiss,
+    /// Swallowed, so a stray key cannot reach the table underneath.
+    Ignore,
+}
+
+/// Classify an intent for a modal.
+///
+/// One exhaustive match rather than one per overlay: a new [`Intent`] variant
+/// then forces a decision in a single place instead of four.
+fn modal_intent(intent: Intent) -> ModalIntent {
+    match intent {
+        Intent::Accept => ModalIntent::Accept,
+        // `?` closes whatever is open, the same as Esc.
+        Intent::Quit | Intent::Cancel | Intent::Help => ModalIntent::Dismiss,
+        Intent::NextTab
+        | Intent::PrevTab
+        | Intent::Up
+        | Intent::Down
+        | Intent::PageUp
+        | Intent::PageDown
+        | Intent::First
+        | Intent::Last
+        | Intent::ToggleSelect
+        | Intent::ForceSelect
+        | Intent::ClearSelection
+        | Intent::StartSearch
+        | Intent::SearchInput(_)
+        | Intent::SearchBackspace
+        | Intent::SearchCommit
+        | Intent::SearchCancel
+        | Intent::Filter(_)
+        | Intent::ToggleProtected
+        | Intent::ToggleDescriptions
+        | Intent::CycleSort
+        | Intent::ReverseSort
+        | Intent::SortBy(_)
+        | Intent::Review
+        | Intent::Rescan => ModalIntent::Ignore,
     }
 }
 
@@ -869,26 +1007,137 @@ mod tests {
         assert!(app.status.contains("nothing is marked"));
     }
 
-    #[test]
-    fn reviewing_a_breaking_removal_refuses_it() {
+    /// Mark `small`, which `medium` still depends on.
+    fn app_with_a_breaking_selection() -> App {
         let mut app = app();
         app.view.sort_by(SortKey::Name);
         app.refresh();
         app.handle(Intent::Last);
         assert_eq!(current(&app), "small");
-
         app.handle(Intent::ToggleSelect);
+        app
+    }
+
+    #[test]
+    fn reviewing_a_breaking_removal_offers_to_mark_the_dependants() {
+        let mut app = app_with_a_breaking_selection();
+        app.handle(Intent::Review);
+
+        match &app.overlay {
+            Overlay::Offer { title, lines, add } => {
+                assert!(title.contains("depends on this"), "{title}");
+                assert!(
+                    lines.iter().any(|line| line.contains("medium")),
+                    "{lines:?}"
+                );
+                assert_eq!(add.len(), 1);
+            }
+            Overlay::None | Overlay::Help | Overlay::Notice { .. } | Overlay::Confirm { .. } => {
+                panic!("expected an offer, got {:?}", app.overlay)
+            }
+        }
+    }
+
+    #[test]
+    fn accepting_the_offer_marks_them_and_reopens_the_review() {
+        let mut app = app_with_a_breaking_selection();
+        app.handle(Intent::Review);
+        assert_eq!(app.handle(Intent::Accept), Action::Redraw);
+
+        // `medium` joined the selection, and the review is now consistent.
+        assert_eq!(app.selection.len(), 2);
+        let plan = app.plan();
+        assert!(plan.is_executable());
+        assert_eq!(plan.selected, vec!["medium".to_owned(), "small".to_owned()]);
+        assert!(matches!(app.overlay, Overlay::Confirm { .. }));
+    }
+
+    #[test]
+    fn declining_the_offer_leaves_the_selection_untouched() {
+        let mut app = app_with_a_breaking_selection();
+        app.handle(Intent::Review);
+        assert_eq!(app.handle(Intent::Cancel), Action::Redraw);
+
+        assert_eq!(app.selection.len(), 1);
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(app.status.contains("left the selection"), "{}", app.status);
+    }
+
+    #[test]
+    fn keys_do_not_leak_through_an_offer() {
+        let mut app = app_with_a_breaking_selection();
+        app.handle(Intent::Review);
+        assert_eq!(app.handle(Intent::Down), Action::Idle);
+        assert!(matches!(app.overlay, Overlay::Offer { .. }));
+    }
+
+    #[test]
+    fn a_breakage_that_reaches_the_base_system_is_refused_not_offered() {
+        // `base` depends on `small`, so widening the selection would sweep
+        // the base system up behind a single keystroke. Protection is derived
+        // from the package data — the `base` group here — rather than set on
+        // the facts by hand, because that is what `plan::widen` recomputes.
+        let mut entries = vec![
+            entry("small", 100, InstallReason::Dependency, false, &[]),
+            entry("base", 300, InstallReason::Explicit, true, &["small"]),
+        ];
+        if let Some(base) = entries.get_mut(1) {
+            base.package.groups = vec!["base".to_owned()];
+        }
+        let entries = entries;
+        let inventory = Inventory {
+            index: entries
+                .iter()
+                .enumerate()
+                .map(|(position, entry)| (entry.package.name.clone(), position))
+                .collect(),
+            entries,
+            targets: Vec::new(),
+            atime_support: AtimeSupport::Relatime,
+            scanned_at: 86_400,
+            probed: 2,
+            warnings: Vec::new(),
+        };
+        let mut app = App::new(inventory, View::default(), false);
+        app.selection.insert(0);
         app.handle(Intent::Review);
 
         match &app.overlay {
             Overlay::Notice { title, lines } => {
-                assert!(title.contains("break"));
-                assert!(lines.iter().any(|line| line.contains("medium")));
+                assert!(title.contains("break"), "{title}");
+                assert!(
+                    lines.iter().any(|line| line.contains("base system")),
+                    "{lines:?}"
+                );
             }
-            Overlay::None | Overlay::Help | Overlay::Confirm { .. } => {
-                panic!("expected a notice, got {:?}", app.overlay)
+            Overlay::None | Overlay::Help | Overlay::Offer { .. } | Overlay::Confirm { .. } => {
+                panic!("expected a refusal, got {:?}", app.overlay)
             }
         }
+        assert_eq!(app.selection.len(), 1);
+    }
+
+    #[test]
+    fn the_description_toggle_widens_and_narrows_the_search() {
+        let mut app = app();
+        assert!(!app.view.match_descriptions);
+        app.handle(Intent::ToggleDescriptions);
+        assert!(app.view.match_descriptions);
+        assert!(app.status.contains("descriptions"), "{}", app.status);
+        app.handle(Intent::ToggleDescriptions);
+        assert!(!app.view.match_descriptions);
+        assert!(app.status.contains("names only"), "{}", app.status);
+    }
+
+    #[test]
+    fn searching_matches_names_rather_than_descriptions() {
+        let mut app = app();
+        app.handle(Intent::StartSearch);
+        for character in "small".chars() {
+            app.handle(Intent::SearchInput(character));
+        }
+        assert_eq!(app.order.len(), 1);
+        assert_eq!(current(&app), "small");
     }
 
     #[test]
