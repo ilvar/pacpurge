@@ -87,6 +87,16 @@ pacpurge never deletes a package file itself. Removals are handed to
 confirmation prompt — pacpurge's review screen is a second pair of eyes, not a
 replacement for pacman's.
 
+After a removal finishes and the rescan lands, pacpurge offers one follow-up:
+pacman keeps the downloaded `.pkg.tar.zst` of everything it has ever
+installed, and those archives outlive the package. The moment just after a
+removal is when clearing them needs no thought, so it proposes
+`paccache -r -u -k0` — keep zero versions of packages you no longer have — with
+the real figure from the rescan rather than an estimate. Installed packages'
+archives are untouched, so rollback still works. If `paccache` is missing it
+falls back to deleting exactly the archives it identified, and if the cache is
+already clean it says nothing at all.
+
 Beyond that:
 
 - **Protected packages.** Everything the `base` group depends on, plus the

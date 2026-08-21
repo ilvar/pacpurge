@@ -93,6 +93,11 @@ manager.
 - **Never delete package files directly.** Removals go to `pacman -Rns`, which
   runs its own checks and its own prompt. Direct deletion is only for caches
   and leftovers that pacman does not own.
+- **Propose a follow-up only after the rescan, and only when it is worth it.**
+  `App::offer_follow_up` runs once the new inventory is in, so the size it
+  quotes is what the run actually produced. It stays silent when the target is
+  empty; a prompt offering to free nothing trains people to dismiss prompts.
+  A follow-up must never carry a follow-up of its own.
 - **Never widen the untracked-file scan.** Post-install hooks create files
   pacman does not own; flagging them would be mostly false positives. Kernel
   module trees are reported only because `pkgbase` gives a definitive answer.

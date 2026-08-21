@@ -11,7 +11,7 @@ use std::io::{self, Write};
 use std::process;
 use std::time::Duration;
 
-use pacpurge::app::{Action, App};
+use pacpurge::app::{Action, App, FollowUp};
 use pacpurge::capability;
 use pacpurge::cli::{self, Mode, Options};
 use pacpurge::filter::View;
@@ -171,8 +171,12 @@ fn event_loop(
                 app.adopt(inventory);
                 dirty = true;
             }
-            Action::Run { steps, summary } => {
-                execute(terminal, app, &steps, &summary, options)?;
+            Action::Run {
+                steps,
+                summary,
+                follow_up,
+            } => {
+                execute(terminal, app, &steps, &summary, follow_up, options)?;
                 dirty = true;
             }
         }
@@ -189,6 +193,7 @@ fn execute(
     app: &mut App,
     steps: &[Step],
     summary: &str,
+    follow_up: FollowUp,
     options: &Options,
 ) -> Result<(), String> {
     if steps.is_empty() {
@@ -230,6 +235,12 @@ fn execute(
     } else {
         format!("{failures} step(s) did not complete; rescanned anyway")
     };
+
+    // Proposed only after the rescan, so the figures it quotes are the ones
+    // the run actually produced.
+    if failures == 0 {
+        app.offer_follow_up(follow_up);
+    }
 
     Ok(())
 }
