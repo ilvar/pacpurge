@@ -324,6 +324,74 @@ proptest! {
         }
     }
 
+    /// Accepting the widening always resolves the breakage.
+    ///
+    /// This is the promise the offer makes to the user: say yes and the
+    /// removal becomes something pacman will accept. If any graph shape could
+    /// leave a stranded dependant behind, the prompt would be lying.
+    #[test]
+    fn widening_a_selection_always_removes_the_breakage(specification in package_graph()) {
+        let packages = build_packages(&specification);
+        let inventory = inventory_of(packages);
+
+        let selection: BTreeSet<usize> = specification
+            .seed
+            .iter()
+            .filter(|position| **position < inventory.entries.len())
+            .copied()
+            .collect();
+        if selection.is_empty() {
+            return Ok(());
+        }
+
+        let widening = pacpurge::plan::widen(&inventory, &selection);
+        let mut widened = selection.clone();
+        widened.extend(widening.positions.iter().copied());
+
+        let plan = pacpurge::plan::build(&inventory, &widened);
+        prop_assert!(
+            plan.broken.is_empty(),
+            "widening left {:?} stranded",
+            plan.broken
+        );
+    }
+
+    /// Widening never proposes something already selected, and never shrinks
+    /// what the transaction frees.
+    #[test]
+    fn widening_only_ever_adds(specification in package_graph()) {
+        let packages = build_packages(&specification);
+        let inventory = inventory_of(packages);
+
+        let selection: BTreeSet<usize> = specification
+            .seed
+            .iter()
+            .filter(|position| **position < inventory.entries.len())
+            .copied()
+            .collect();
+        if selection.is_empty() {
+            return Ok(());
+        }
+
+        let before = pacpurge::plan::build(&inventory, &selection).bytes;
+        let widening = pacpurge::plan::widen(&inventory, &selection);
+
+        for position in &widening.positions {
+            prop_assert!(
+                !selection.contains(position),
+                "widening proposed an already selected package"
+            );
+        }
+
+        if !widening.positions.is_empty() {
+            prop_assert!(
+                widening.bytes >= before,
+                "widening reported {}, less than the {before} already selected",
+                widening.bytes
+            );
+        }
+    }
+
     /// A parsed archive filename can be rebuilt from its parts.
     #[test]
     fn archive_names_round_trip(name in package_name(), pkgver in version()) {
@@ -376,6 +444,39 @@ fn build_packages(specification: &Specification) -> Vec<Package> {
             ..Package::default()
         })
         .collect()
+}
+
+/// Wrap generated packages in an inventory with default facts.
+fn inventory_of(packages: Vec<Package>) -> pacpurge::model::Inventory {
+    let entries: Vec<Entry> = packages
+        .into_iter()
+        .map(|package| Entry {
+            package,
+            facts: Facts {
+                required_by: Vec::new(),
+                optional_for: Vec::new(),
+                origin: Origin::Unknown,
+                usage: UsageEvidence::NotProbed,
+                reclaimable: 0,
+                frees: Vec::new(),
+                protected: false,
+            },
+        })
+        .collect();
+
+    pacpurge::model::Inventory {
+        index: entries
+            .iter()
+            .enumerate()
+            .map(|(position, entry)| (entry.package.name.clone(), position))
+            .collect(),
+        entries,
+        targets: Vec::new(),
+        atime_support: pacpurge::model::AtimeSupport::Relatime,
+        scanned_at: 0,
+        probed: 0,
+        warnings: Vec::new(),
+    }
 }
 
 /// A single table row with arbitrary but plausible contents.

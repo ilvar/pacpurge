@@ -221,6 +221,52 @@ impl<'a> Graph<'a> {
         broken.into_iter().collect()
     }
 
+    /// Everything that would have to go with `seed` for the removal to be
+    /// consistent: the transitive closure of "depends on something in here".
+    ///
+    /// This is the answer to *"what else do I have to mark?"*. It is the
+    /// closure rather than the direct dependants because marking the direct
+    /// ones usually strands their own dependants in turn, and walking that one
+    /// layer at a time is a poor way to spend a user's afternoon.
+    pub fn dependants(&self, seed: &BTreeSet<usize>) -> BTreeSet<usize> {
+        let mut reached: BTreeSet<usize> = BTreeSet::new();
+        let mut work: Vec<usize> = seed.iter().copied().collect();
+
+        while let Some(position) = work.pop() {
+            let Some(requirers) = self.required_by.get(position) else {
+                continue;
+            };
+            for requirer in requirers {
+                if seed.contains(requirer) || !reached.insert(*requirer) {
+                    continue;
+                }
+                work.push(*requirer);
+            }
+        }
+
+        reached
+    }
+
+    /// Installed size of a set of packages.
+    pub fn total_size(&self, positions: &BTreeSet<usize>) -> u64 {
+        positions
+            .iter()
+            .filter_map(|position| self.packages.get(*position))
+            .map(|package| package.size)
+            .fold(0u64, u64::saturating_add)
+    }
+
+    /// Names for a set of positions, sorted.
+    pub fn names_of(&self, positions: &BTreeSet<usize>) -> Vec<String> {
+        let mut names: Vec<String> = positions
+            .iter()
+            .filter_map(|position| self.packages.get(*position))
+            .map(|package| package.name.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
     fn names(&self, positions: Option<&[usize]>) -> Vec<String> {
         let mut names: Vec<String> = positions
             .unwrap_or_default()
@@ -436,6 +482,64 @@ mod tests {
             graph.broken_by(&seed),
             vec!["app".to_owned(), "other".to_owned()]
         );
+    }
+
+    #[test]
+    fn dependants_are_collected_transitively() {
+        // start -> mid -> leaf, so removing `leaf` strands both of the others.
+        let packages = vec![
+            package("leaf", 1, InstallReason::Dependency, &[]),
+            package("mid", 2, InstallReason::Dependency, &["leaf"]),
+            package("start", 4, InstallReason::Explicit, &["mid"]),
+            package("unrelated", 8, InstallReason::Explicit, &[]),
+        ];
+        let graph = Graph::build(&packages);
+
+        let mut seed = BTreeSet::new();
+        seed.insert(graph.position("leaf").unwrap());
+
+        let dependants = graph.dependants(&seed);
+        assert_eq!(
+            graph.names_of(&dependants),
+            vec!["mid".to_owned(), "start".to_owned()]
+        );
+        assert_eq!(graph.total_size(&dependants), 6);
+    }
+
+    #[test]
+    fn dependants_of_a_leaf_are_empty() {
+        let packages = fixture();
+        let graph = Graph::build(&packages);
+        let mut seed = BTreeSet::new();
+        seed.insert(graph.position("app").unwrap());
+        assert!(graph.dependants(&seed).is_empty());
+    }
+
+    #[test]
+    fn dependants_terminate_on_a_cycle() {
+        let packages = vec![
+            package("a", 1, InstallReason::Dependency, &["b"]),
+            package("b", 2, InstallReason::Dependency, &["a"]),
+        ];
+        let graph = Graph::build(&packages);
+        let mut seed = BTreeSet::new();
+        seed.insert(graph.position("a").unwrap());
+        assert_eq!(
+            graph.names_of(&graph.dependants(&seed)),
+            vec!["b".to_owned()]
+        );
+    }
+
+    #[test]
+    fn dependants_never_include_the_seed() {
+        let packages = fixture();
+        let graph = Graph::build(&packages);
+        let mut seed = BTreeSet::new();
+        seed.insert(graph.position("lib").unwrap());
+        seed.insert(graph.position("app").unwrap());
+
+        let dependants = graph.dependants(&seed);
+        assert_eq!(graph.names_of(&dependants), vec!["other".to_owned()]);
     }
 
     #[test]

@@ -114,8 +114,15 @@ pub const TOGGLES: [Toggle; 5] = [
 /// The complete filter and sort state of the table.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct View {
-    /// Substring the package name or description must contain.
+    /// Substring the package name must contain. When `match_descriptions` is
+    /// on, a hit in the description counts too.
     pub query: String,
+    /// Whether the query is also matched against package descriptions.
+    ///
+    /// Off by default: searching `lib` should find the packages *called*
+    /// `lib…`, not the several hundred whose description happens to contain
+    /// the word.
+    pub match_descriptions: bool,
     /// Active toggles.
     pub toggles: Vec<Toggle>,
     /// Column to order by.
@@ -132,6 +139,7 @@ impl Default for View {
     fn default() -> View {
         View {
             query: String::new(),
+            match_descriptions: false,
             toggles: Vec::new(),
             sort: SortKey::Size,
             descending: true,
@@ -168,6 +176,21 @@ impl View {
         true
     }
 
+    /// Widen or narrow the search to package descriptions.
+    pub fn toggle_descriptions(&mut self) -> bool {
+        self.match_descriptions = !self.match_descriptions;
+        self.match_descriptions
+    }
+
+    /// What the search field is currently matching against.
+    pub fn search_scope(&self) -> &'static str {
+        if self.match_descriptions {
+            "name+description"
+        } else {
+            "name"
+        }
+    }
+
     /// Whether the view is showing everything.
     pub fn is_unfiltered(&self) -> bool {
         self.query.is_empty() && self.toggles.is_empty() && !self.hide_protected
@@ -182,9 +205,11 @@ pub fn matches(entry: &Entry, view: &View, now: i64) -> bool {
 
     if !view.query.is_empty() {
         let needle = view.query.to_lowercase();
-        let name_hit = entry.package.name.to_lowercase().contains(&needle);
-        let description_hit = entry.package.description.to_lowercase().contains(&needle);
-        if !name_hit && !description_hit {
+        let mut hit = entry.package.name.to_lowercase().contains(&needle);
+        if !hit && view.match_descriptions {
+            hit = entry.package.description.to_lowercase().contains(&needle);
+        }
+        if !hit {
             return false;
         }
     }
@@ -432,16 +457,33 @@ mod tests {
     }
 
     #[test]
-    fn the_query_matches_name_or_description() {
+    fn the_query_matches_names_case_insensitively() {
         let mut view = View::default();
         "HOG".clone_into(&mut view.query);
         assert_eq!(names(&corpus(), &view), vec!["aur-hog"]);
 
-        "the busy-lib package".clone_into(&mut view.query);
-        assert_eq!(names(&corpus(), &view), vec!["busy-lib"]);
+        "-lib".clone_into(&mut view.query);
+        assert_eq!(names(&corpus(), &view), vec!["leftover-lib", "busy-lib"]);
 
         "nothing-matches".clone_into(&mut view.query);
         assert!(names(&corpus(), &view).is_empty());
+    }
+
+    #[test]
+    fn descriptions_are_searched_only_when_asked_for() {
+        let mut view = View::default();
+        // Every fixture description is "the <name> package", so a query that
+        // only appears in descriptions must find nothing by default.
+        "package".clone_into(&mut view.query);
+        assert!(names(&corpus(), &view).is_empty());
+
+        assert!(view.toggle_descriptions());
+        assert_eq!(names(&corpus(), &view).len(), 4);
+        assert_eq!(view.search_scope(), "name+description");
+
+        assert!(!view.toggle_descriptions());
+        assert!(names(&corpus(), &view).is_empty());
+        assert_eq!(view.search_scope(), "name");
     }
 
     #[test]
