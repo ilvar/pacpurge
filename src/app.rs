@@ -11,7 +11,7 @@ use ratatui::widgets::TableState;
 
 use crate::filter::{self, SortKey, Toggle, View};
 use crate::format;
-use crate::janitor::{Reclaim, Target};
+use crate::janitor::{Kind, Reclaim, Target};
 use crate::model::Inventory;
 use crate::plan::{self, Plan, Step};
 
@@ -118,9 +118,25 @@ pub enum Action {
         steps: Vec<Step>,
         /// What to tell the user before running them.
         summary: String,
+        /// What to propose once the rescan that follows has landed.
+        follow_up: FollowUp,
     },
     /// Re-read the system and rebuild the state.
     Rescan,
+}
+
+/// Something worth proposing once a run has finished and the rescan is in.
+///
+/// A removal leaves cached archives behind: pacman keeps the `.pkg.tar.zst`
+/// for everything it has ever installed, and those files survive the package
+/// itself. Nothing references them afterwards, so the moment just after a
+/// removal is exactly when clearing them needs no thought.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FollowUp {
+    /// Nothing to propose.
+    None,
+    /// Offer to clear cached archives for packages that are no longer installed.
+    ClearRemovedFromCache,
 }
 
 /// A modal shown over the main interface.
@@ -140,6 +156,8 @@ pub enum Overlay {
         steps: Vec<Step>,
         /// Whether to draw the modal as a warning.
         danger: bool,
+        /// What to propose after the run.
+        follow_up: FollowUp,
     },
     /// Something the user should read, with nothing to confirm.
     Notice {
@@ -215,6 +233,66 @@ impl App {
         self.selection.clear();
         self.refresh();
         self.status = self.opening_status();
+        true
+    }
+
+    /// Propose whatever the finished run made worth doing next.
+    ///
+    /// Called after the rescan, so the figures quoted are the ones the run
+    /// actually produced rather than an estimate made before it. Returns
+    /// whether a modal was opened.
+    pub fn offer_follow_up(&mut self, follow_up: FollowUp) -> bool {
+        match follow_up {
+            FollowUp::None => false,
+            FollowUp::ClearRemovedFromCache => self.offer_cache_sweep(),
+        }
+    }
+
+    /// Offer to clear cached archives for packages that are no longer installed.
+    fn offer_cache_sweep(&mut self) -> bool {
+        let Some(target) = self
+            .inventory
+            .targets
+            .iter()
+            .find(|target| target.kind == Kind::PacmanCacheUninstalled)
+        else {
+            return false;
+        };
+
+        if target.items == 0 || target.known_bytes() == 0 {
+            return false;
+        }
+
+        // Reuse the target's own reclaim step, so this follows paccache when
+        // it is installed and falls back to deleting the exact archives when
+        // it is not.
+        let Some(step) = plan::step_for(target) else {
+            return false;
+        };
+
+        let lines = vec![
+            format!(
+                "{} cached archive(s) in the package cache are for packages that are no longer \
+                 installed.",
+                target.items
+            ),
+            String::new(),
+            "pacman keeps the downloaded archive of everything it has ever installed, and those \
+             files outlive the package. Nothing references these any more."
+                .to_owned(),
+            String::new(),
+            format!("Frees {}.", format::bytes(target.known_bytes())),
+            String::new(),
+            format!("Runs: {}", step.to_shell()),
+        ];
+
+        self.overlay = Overlay::Confirm {
+            title: "Clear the cache they left behind?".to_owned(),
+            lines,
+            steps: vec![step],
+            danger: false,
+            follow_up: FollowUp::None,
+        };
         true
     }
 
@@ -450,6 +528,7 @@ impl App {
                 lines,
                 steps,
                 danger,
+                follow_up,
             } => match intent {
                 ModalIntent::Accept => {
                     let summary = self.describe(&steps);
@@ -459,9 +538,14 @@ impl App {
                         return Action::Run {
                             steps: Vec::new(),
                             summary,
+                            follow_up: FollowUp::None,
                         };
                     }
-                    Action::Run { steps, summary }
+                    Action::Run {
+                        steps,
+                        summary,
+                        follow_up,
+                    }
                 }
                 ModalIntent::Dismiss => {
                     "cancelled".clone_into(&mut self.status);
@@ -473,6 +557,7 @@ impl App {
                         lines,
                         steps,
                         danger,
+                        follow_up,
                     };
                     Action::Idle
                 }
@@ -645,6 +730,7 @@ impl App {
                 command: plan.command(),
             }],
             danger: !plan.protected.is_empty(),
+            follow_up: FollowUp::ClearRemovedFromCache,
         };
         Action::Redraw
     }
@@ -774,6 +860,7 @@ impl App {
             lines,
             steps: vec![step],
             danger,
+            follow_up: FollowUp::None,
         };
         Action::Redraw
     }
@@ -879,11 +966,12 @@ fn modal_intent(intent: Intent) -> ModalIntent {
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, App, Intent, Overlay, Tab};
+    use super::{Action, App, FollowUp, Intent, Overlay, Tab};
     use crate::filter::{SortKey, Toggle, View};
     use crate::model::{
         AtimeSupport, Entry, Facts, InstallReason, Inventory, Origin, Package, UsageEvidence,
     };
+    use crate::plan::Step;
 
     fn entry(
         name: &str,
@@ -1117,6 +1205,112 @@ mod tests {
         assert_eq!(app.selection.len(), 1);
     }
 
+    /// An inventory carrying a cache target of the given size.
+    fn app_with_cached_archives(items: usize, bytes: u64) -> App {
+        let mut app = app();
+        app.inventory.targets = vec![crate::janitor::Target {
+            kind: crate::janitor::Kind::PacmanCacheUninstalled,
+            title: "Cached archives for packages you removed".to_owned(),
+            location: "/var/cache/pacman/pkg".to_owned(),
+            detail: "not installed any more".to_owned(),
+            bytes: Some(bytes),
+            items,
+            safety: crate::janitor::Safety::Safe,
+            reclaim: crate::janitor::Reclaim::Run {
+                command: crate::janitor::Command::new("paccache", &["-r", "-u", "-k0"], true),
+            },
+        }];
+        app
+    }
+
+    #[test]
+    fn a_removal_offers_to_clear_the_cache_it_left_behind() {
+        let mut app = app_with_cached_archives(12, 300_000_000);
+        assert!(app.offer_follow_up(FollowUp::ClearRemovedFromCache));
+
+        match &app.overlay {
+            Overlay::Confirm {
+                title,
+                lines,
+                steps,
+                danger,
+                follow_up,
+            } => {
+                assert!(title.contains("cache"), "{title}");
+                assert!(lines.iter().any(|line| line.contains("12")), "{lines:?}");
+                assert!(
+                    lines.iter().any(|line| line.contains("286.1 MiB")),
+                    "{lines:?}"
+                );
+                assert_eq!(steps.len(), 1);
+                assert_eq!(
+                    steps.first().map(Step::to_shell),
+                    Some("sudo paccache -r -u -k0".to_owned())
+                );
+                assert!(!danger);
+                // The sweep must not propose another sweep after itself.
+                assert_eq!(*follow_up, FollowUp::None);
+            }
+            Overlay::None | Overlay::Help | Overlay::Notice { .. } | Overlay::Offer { .. } => {
+                panic!("expected a confirmation, got {:?}", app.overlay)
+            }
+        }
+    }
+
+    #[test]
+    fn an_empty_cache_is_not_worth_a_prompt() {
+        let mut app = app_with_cached_archives(0, 0);
+        assert!(!app.offer_follow_up(FollowUp::ClearRemovedFromCache));
+        assert_eq!(app.overlay, Overlay::None);
+
+        // Nor is a target that exists but holds nothing.
+        let mut app = app_with_cached_archives(4, 0);
+        assert!(!app.offer_follow_up(FollowUp::ClearRemovedFromCache));
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
+    #[test]
+    fn no_cache_target_means_no_prompt() {
+        let mut app = app();
+        assert!(app.inventory.targets.is_empty());
+        assert!(!app.offer_follow_up(FollowUp::ClearRemovedFromCache));
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
+    #[test]
+    fn a_janitor_run_proposes_nothing_afterwards() {
+        let mut app = app_with_cached_archives(12, 300_000_000);
+        assert!(!app.offer_follow_up(FollowUp::None));
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
+    #[test]
+    fn accepting_the_cache_sweep_runs_the_command() {
+        let mut app = app_with_cached_archives(12, 300_000_000);
+        app.offer_follow_up(FollowUp::ClearRemovedFromCache);
+
+        match app.handle(Intent::Accept) {
+            Action::Run {
+                steps,
+                summary,
+                follow_up,
+            } => {
+                assert_eq!(steps.len(), 1);
+                assert_eq!(summary, "sudo paccache -r -u -k0");
+                assert_eq!(follow_up, FollowUp::None);
+            }
+            other => panic!("expected a run action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn declining_the_cache_sweep_just_closes_it() {
+        let mut app = app_with_cached_archives(12, 300_000_000);
+        app.offer_follow_up(FollowUp::ClearRemovedFromCache);
+        assert_eq!(app.handle(Intent::Cancel), Action::Redraw);
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
     #[test]
     fn the_description_toggle_widens_and_narrows_the_search() {
         let mut app = app();
@@ -1148,9 +1342,16 @@ mod tests {
         assert!(matches!(app.overlay, Overlay::Confirm { .. }));
 
         match app.handle(Intent::Accept) {
-            Action::Run { steps, summary } => {
+            Action::Run {
+                steps,
+                summary,
+                follow_up,
+            } => {
                 assert_eq!(steps.len(), 1);
                 assert_eq!(summary, "sudo pacman -Rns big");
+                // A removal leaves cached archives behind, so the run carries
+                // the offer to clear them.
+                assert_eq!(follow_up, FollowUp::ClearRemovedFromCache);
             }
             other => panic!("expected a run action, got {other:?}"),
         }
@@ -1165,9 +1366,15 @@ mod tests {
         app.handle(Intent::Review);
 
         match app.handle(Intent::Accept) {
-            Action::Run { steps, summary } => {
+            Action::Run {
+                steps,
+                summary,
+                follow_up,
+            } => {
                 assert!(steps.is_empty());
                 assert_eq!(summary, "sudo pacman -Rns big");
+                // Nothing ran, so there is nothing to clean up after.
+                assert_eq!(follow_up, FollowUp::None);
             }
             other => panic!("expected an empty run action, got {other:?}"),
         }

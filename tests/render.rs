@@ -5,7 +5,7 @@
 //! state machine cannot: a panicking layout, a column that never gets drawn,
 //! or a number that reaches the screen in the wrong form.
 
-use pacpurge::app::{App, Intent};
+use pacpurge::app::{App, FollowUp, Intent};
 use pacpurge::filter::View;
 use pacpurge::janitor::{Command, Kind, Reclaim, Safety, Target};
 use pacpurge::model::{
@@ -370,4 +370,33 @@ fn a_name_search_ignores_a_description_only_match() {
     app.handle(Intent::ToggleDescriptions);
     assert_eq!(app.order.len(), 1);
     assert!(screen(&mut app, 140, 30).contains("toy-plugin"));
+}
+
+#[test]
+fn the_cache_sweep_offer_names_the_command_and_the_size() {
+    let mut app = app();
+    // The reclaim tab's cache target is what the sweep reuses.
+    app.inventory.targets = vec![Target {
+        kind: Kind::PacmanCacheUninstalled,
+        title: "Cached archives for packages you removed".to_owned(),
+        location: "/var/cache/pacman/pkg".to_owned(),
+        detail: "not installed any more".to_owned(),
+        bytes: Some(2_000_000_000),
+        items: 214,
+        safety: Safety::Safe,
+        reclaim: Reclaim::Run {
+            command: Command::new("paccache", &["-r", "-u", "-k0"], true),
+        },
+    }];
+    assert!(app.offer_follow_up(FollowUp::ClearRemovedFromCache));
+
+    let rendered = screen(&mut app, 140, 30);
+    assert!(
+        rendered.contains("Clear the cache they left behind?"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("214 cached archive"), "{rendered}");
+    assert!(rendered.contains("1.8 GiB"), "{rendered}");
+    assert!(rendered.contains("sudo paccache -r -u -k0"), "{rendered}");
+    assert!(rendered.contains("y to run"), "{rendered}");
 }

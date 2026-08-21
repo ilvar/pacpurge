@@ -698,6 +698,7 @@ fn render_overlay(frame: &mut Frame<'_>, app: &App, area: Rect) {
             lines,
             steps: _,
             danger,
+            follow_up: _,
         } => {
             let rendered: Vec<Line<'_>> =
                 lines.iter().map(|line| Line::from(line.clone())).collect();
