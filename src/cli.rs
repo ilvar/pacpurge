@@ -19,6 +19,8 @@ pub enum Mode {
     List,
     /// Print the cleanup targets as plain text and exit.
     Clean,
+    /// Explain what the last-use probe can and cannot see, and exit.
+    Diagnose,
     /// Print usage and exit.
     Help,
     /// Print the version and exit.
@@ -121,6 +123,9 @@ MODES
   (default)          interactive terminal interface
   --list             print the package table and exit
   --clean            print the non-package cleanup targets and exit
+  --diagnose         explain what the last-use probe can see on this system:
+                     mount options, which evidence each source produced, and
+                     what to change if the column is empty
   --json             print the whole analysis as one JSON document and exit
   -h, --help         print this text
   -V, --version      print the version
@@ -186,6 +191,7 @@ pub fn parse(arguments: &[String]) -> Result<Options, Error> {
             "--json" => options.mode = Mode::Json,
             "--list" => options.mode = Mode::List,
             "--clean" => options.mode = Mode::Clean,
+            "--diagnose" => options.mode = Mode::Diagnose,
             "--no-usage" => options.probe_usage = false,
             "--quick" => options.measure_directories = false,
             "--dry-run" => options.dry_run = true,
@@ -322,6 +328,7 @@ mod tests {
             "--json",
             "--list",
             "--clean",
+            "--diagnose",
         ] {
             assert!(
                 super::HELP.contains(option),

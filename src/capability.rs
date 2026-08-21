@@ -183,6 +183,57 @@ mod effects {
         usage
     }
 
+    /// The newest modification time anywhere under `root`.
+    ///
+    /// Modification times are never suppressed by mount options, which is what
+    /// makes this usable on a `noatime` filesystem where access times are
+    /// frozen. Bounded by `budget` entries, and returns the path that carried
+    /// the timestamp so the interface can show its evidence.
+    pub fn newest_mtime(root: &Path, budget: usize) -> Option<(i64, PathBuf)> {
+        let mut best: Option<(i64, PathBuf)> = None;
+        let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
+        let mut visited = 0usize;
+
+        if let Ok(metadata) = fs::symlink_metadata(root) {
+            best = Some((metadata.mtime(), root.to_path_buf()));
+        }
+
+        while let Some(directory) = stack.pop() {
+            let Ok(children) = fs::read_dir(&directory) else {
+                continue;
+            };
+
+            for child in children.flatten() {
+                visited = visited.saturating_add(1);
+                if visited > budget {
+                    return best;
+                }
+
+                let Ok(metadata) = fs::symlink_metadata(child.path()) else {
+                    continue;
+                };
+                if metadata.file_type().is_symlink() {
+                    continue;
+                }
+
+                let mtime = metadata.mtime();
+                let newer = match &best {
+                    Some((current, _path)) => mtime > *current,
+                    None => true,
+                };
+                if newer {
+                    best = Some((mtime, child.path()));
+                }
+
+                if metadata.is_dir() {
+                    stack.push(child.path());
+                }
+            }
+        }
+
+        best
+    }
+
     /// Collect paths under `root` whose file name ends with one of `suffixes`.
     ///
     /// Bounded by `budget` for the same reason as [`tree_usage`].
@@ -303,6 +354,6 @@ mod effects {
 }
 
 pub use effects::{
-    effective_uid, exists, find_by_suffix, has_program, home_dir, list_dir, now, read_text, remove,
-    run_captured, run_interactive, stat, tree_usage,
+    effective_uid, exists, find_by_suffix, has_program, home_dir, list_dir, newest_mtime, now,
+    read_text, remove, run_captured, run_interactive, stat, tree_usage,
 };

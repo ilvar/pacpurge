@@ -80,6 +80,11 @@ fn run(options: &Options) -> Result<process::ExitCode, String> {
             print!("{}", report::clean(&inventory));
             Ok(process::ExitCode::SUCCESS)
         }
+        Mode::Diagnose => {
+            let inventory = collect(options)?;
+            print!("{}", report::diagnose(&inventory));
+            Ok(process::ExitCode::SUCCESS)
+        }
         Mode::Interactive => interactive(options),
     }
 }

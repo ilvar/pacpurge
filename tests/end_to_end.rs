@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use pacpurge::filter::{SortKey, Toggle, View};
+use pacpurge::format;
 use pacpurge::model::{Origin, UsageEvidence};
 use pacpurge::report;
 use pacpurge::scan::{self, Config};
@@ -528,4 +529,172 @@ fn every_package_name_resolves_through_the_index() {
         let entry = inventory.get(name).expect("the index should resolve");
         assert_eq!(entry.package.size, size);
     }
+}
+
+/// Build a root whose package files all carry an install-time access time,
+/// which is what a `noatime` mount leaves behind, and give some of the
+/// packages state under a home directory.
+fn noatime_style_root(name: &str) -> PathBuf {
+    let root = fixture_root(name);
+    let installed = days_ago(11);
+
+    for (package, files, config_dir, used_days_ago) in [
+        (
+            "vlc",
+            &["usr/bin/vlc", "usr/lib/vlc/plugin.so"][..],
+            Some("vlc"),
+            Some(1u64),
+        ),
+        ("gimp", &["usr/bin/gimp"][..], Some("gimp"), Some(5)),
+        ("obscure-tool", &["usr/bin/obscure-tool"][..], None, None),
+    ] {
+        let entry = root
+            .join("var/lib/pacman/local")
+            .join(format!("{package}-1.0-1"));
+        fs::create_dir_all(&entry).expect("could not create the database entry");
+        fs::write(
+            entry.join("desc"),
+            format!(
+                "%NAME%\n{package}\n\n%VERSION%\n1.0-1\n\n%SIZE%\n1000\n\n%INSTALLDATE%\n{}\n\n%REASON%\n0\n",
+                unix(installed)
+            ),
+        )
+        .expect("could not write desc");
+        let listing: String = files.iter().map(|path| format!("{path}\n")).collect();
+        fs::write(entry.join("files"), format!("%FILES%\n{listing}"))
+            .expect("could not write files");
+
+        for relative in files {
+            let path = root.join(relative);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("could not create a package directory");
+            }
+            fs::write(&path, vec![0u8; 64]).expect("could not write a package file");
+            let handle = File::options()
+                .write(true)
+                .open(&path)
+                .expect("could not reopen a package file");
+            // The signature of noatime: the access time never moved past
+            // installation, however much the package is used.
+            handle
+                .set_times(
+                    FileTimes::new()
+                        .set_accessed(installed)
+                        .set_modified(installed),
+                )
+                .expect("could not set the access time");
+        }
+
+        let (Some(config_dir), Some(used)) = (config_dir, used_days_ago) else {
+            continue;
+        };
+        let directory = root.join("home/rkd/.config").join(config_dir);
+        fs::create_dir_all(&directory).expect("could not create the config directory");
+        let settings = directory.join("settings.conf");
+        fs::write(&settings, b"state\n").expect("could not write config state");
+        let handle = File::options()
+            .write(true)
+            .open(&settings)
+            .expect("could not reopen config state");
+        handle
+            .set_times(
+                FileTimes::new()
+                    .set_accessed(days_ago(used))
+                    .set_modified(days_ago(used)),
+            )
+            .expect("could not set the config time");
+
+        // The directory carries a modification time too, and it is newer than
+        // its contents the moment it is created. Age it as well, or the
+        // fixture only ever proves the directory was made just now.
+        let directory_handle = File::open(&directory).expect("could not open the config directory");
+        directory_handle
+            .set_times(
+                FileTimes::new()
+                    .set_accessed(days_ago(used))
+                    .set_modified(days_ago(used)),
+            )
+            .expect("could not set the config directory time");
+    }
+
+    root
+}
+
+#[test]
+fn home_state_dates_a_package_whose_access_time_never_moved() {
+    // The real-world case this exists for: on a noatime filesystem every
+    // package file carries its install-time access time, so access times alone
+    // report every package as unused. What the application wrote under the
+    // user's home directory is unaffected by the mount option.
+    let root = noatime_style_root("home-activity");
+    let config = Config {
+        home: Some(root.join("home/rkd")),
+        ..config(&root)
+    };
+
+    let inventory = scan::scan(&config).expect("the scan should succeed");
+
+    let vlc = inventory.get("vlc").expect("vlc is installed");
+    match &vlc.facts.usage {
+        UsageEvidence::UsedFromHome { at: _, witness } => {
+            assert!(witness.contains(".config/vlc"), "witness was {witness}");
+        }
+        other => panic!("expected home-directory evidence for vlc, got {other:?}"),
+    }
+
+    // gimp was upgraded 11 days ago and run 5 days ago. The access time was
+    // reset by the upgrade and never moved after it, so access times alone
+    // would call it unused; the home write overturns that.
+    let gimp = inventory.get("gimp").expect("gimp is installed");
+    assert!(gimp.facts.usage.is_used(), "{:?}", gimp.facts.usage);
+    let age = format::days_since(
+        inventory.scanned_at,
+        gimp.facts.usage.timestamp().unwrap_or(0),
+    );
+    assert!((4..=6).contains(&age), "gimp looked {age} days old");
+
+    // A package with no home state keeps the access-time verdict, which under
+    // these conditions is honestly "never read since installed".
+    let obscure = inventory
+        .get("obscure-tool")
+        .expect("obscure-tool is installed");
+    assert!(
+        obscure.facts.usage.is_unused() || obscure.facts.usage == UsageEvidence::AtimeDisabled,
+        "{:?}",
+        obscure.facts.usage
+    );
+}
+
+#[test]
+fn home_state_is_not_consulted_without_a_home_directory() {
+    let root = noatime_style_root("home-absent");
+    let inventory = scan::scan(&config(&root)).expect("the scan should succeed");
+
+    let vlc = inventory.get("vlc").expect("vlc is installed");
+    assert!(
+        !matches!(vlc.facts.usage, UsageEvidence::UsedFromHome { .. }),
+        "{:?}",
+        vlc.facts.usage
+    );
+}
+
+#[test]
+fn the_diagnosis_explains_where_each_verdict_came_from() {
+    let root = noatime_style_root("diagnose");
+    let config = Config {
+        home: Some(root.join("home/rkd")),
+        ..config(&root)
+    };
+    let inventory = scan::scan(&config).expect("the scan should succeed");
+
+    let rendered = report::diagnose(&inventory);
+    assert!(rendered.contains("LAST-USE DIAGNOSIS"), "{rendered}");
+    assert!(
+        rendered.contains("WHERE EACH VERDICT CAME FROM"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("dated from home-directory state"),
+        "{rendered}"
+    );
 }

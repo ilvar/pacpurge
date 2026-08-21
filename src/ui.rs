@@ -295,11 +295,26 @@ fn right(text: String, width: usize) -> Span<'static> {
 
 /// The text and colour of the last-used cell.
 fn usage_cell(usage: &UsageEvidence, now: i64, atime_known: bool) -> (String, Style) {
+    // Home-directory evidence is independent of access times, so it is shown
+    // even where the mount has frozen them.
+    if let UsageEvidence::UsedFromHome { at, witness: _ } = usage {
+        let days = format::days_since(now, *at);
+        let style = if days >= 180 {
+            Style::default().fg(WARN)
+        } else {
+            Style::default().fg(GOOD)
+        };
+        return (format::age(now, Some(*at)), style);
+    }
+
     if !atime_known {
         return ("—".to_owned(), Style::default().fg(MUTED));
     }
 
     match usage {
+        UsageEvidence::UsedFromHome { at: _, witness: _ } => {
+            ("—".to_owned(), Style::default().fg(MUTED))
+        }
         UsageEvidence::Used { at, witness: _ } => {
             let days = format::days_since(now, *at);
             let style = if days >= 180 {
@@ -362,6 +377,13 @@ fn render_package_detail(frame: &mut Frame<'_>, app: &App, area: Rect) {
             lines.push(field("last read", &format::date(Some(*at))));
             lines.push(Line::from(Span::styled(
                 format!("  via /{witness}"),
+                Style::default().fg(MUTED),
+            )));
+        }
+        UsageEvidence::UsedFromHome { at, witness } => {
+            lines.push(field("last run", &format::date(Some(*at))));
+            lines.push(Line::from(Span::styled(
+                format!("  it wrote {witness}"),
                 Style::default().fg(MUTED),
             )));
         }
