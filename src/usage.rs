@@ -22,81 +22,101 @@
 
 use crate::model::{AtimeSupport, UsageEvidence};
 
-/// Path prefixes whose access times track real use of a package.
+/// Path prefixes grouped into tiers of evidence, strongest first.
 ///
-/// Executables and shared libraries get read when the software runs. Ordering
-/// matters: earlier prefixes are preferred when the witness budget is tight.
-const WITNESS_PREFIXES: [&str; 6] = [
-    "usr/bin/",
-    "usr/local/bin/",
-    "usr/lib/",
-    "usr/lib32/",
-    "opt/",
-    "usr/libexec/",
+/// A package is judged by the strongest tier it actually ships. If it has
+/// executables, whether those ran is the question worth asking; if it ships
+/// only data — a font family, an icon theme, a TeX distribution — then whether
+/// anything read that data is the question instead.
+///
+/// Judging by the *best available* tier rather than by everything at once
+/// matters: taking the newest access time across a mixed set would let a
+/// stray read of one data file vouch for a binary that has never run.
+const WITNESS_TIERS: [&[&str]; 4] = [
+    // Executables: running one is the strongest possible evidence.
+    &[
+        "usr/bin/",
+        "usr/local/bin/",
+        "usr/libexec/",
+        "usr/lib/systemd/",
+        "opt/",
+    ],
+    // Shared libraries, read when something links against them at run time.
+    &["usr/lib/", "usr/lib32/", "usr/local/lib/"],
+    // Data that software reads while running: fonts, icons, themes, texmf,
+    // application resources. This is where the largest packages on a desktop
+    // live, so excluding it wholesale left them with no verdict at all.
+    &["usr/share/", "usr/local/share/", "var/lib/"],
+    // Anything else the package owns. Weak, but a weak verdict beats none.
+    &[],
 ];
 
-/// Path prefixes that are read by indexers and backup tools rather than by
-/// using the software, so their access times mean nothing.
+/// Path prefixes that are read by indexers, documentation viewers and backup
+/// tools rather than by using the software, so their access times mean nothing.
 const NOISE_PREFIXES: [&str; 8] = [
     "usr/share/man/",
     "usr/share/doc/",
     "usr/share/info/",
-    "usr/share/locale/",
     "usr/share/licenses/",
-    "usr/include/",
     "usr/share/help/",
-    "etc/",
+    // Translations for languages the user does not run in are never read even
+    // when the package is in daily use.
+    "usr/share/locale/",
+    "usr/include/",
+    "usr/src/",
 ];
 
 /// Files whose access time is set by tooling rather than by use.
-const NOISE_SUFFIXES: [&str; 5] = [".pc", ".h", ".hpp", ".a", ".pyc"];
+const NOISE_SUFFIXES: [&str; 6] = [".pc", ".h", ".hpp", ".a", ".pyc", ".mo"];
+
+/// Which evidence tier a path belongs to, or `None` if it is noise.
+pub fn witness_tier(path: &str) -> Option<usize> {
+    if NOISE_PREFIXES.iter().any(|prefix| path.starts_with(prefix)) {
+        return None;
+    }
+    if NOISE_SUFFIXES.iter().any(|suffix| path.ends_with(suffix)) {
+        return None;
+    }
+
+    for (tier, prefixes) in WITNESS_TIERS.iter().enumerate() {
+        if prefixes.iter().any(|prefix| path.starts_with(prefix)) {
+            return Some(tier);
+        }
+    }
+
+    // The final tier has no prefixes and catches everything left over.
+    Some(WITNESS_TIERS.len().saturating_sub(1))
+}
 
 /// Whether a path is worth stat-ing as evidence of use.
 pub fn is_witness(path: &str) -> bool {
-    if NOISE_PREFIXES.iter().any(|prefix| path.starts_with(prefix)) {
-        return false;
-    }
-    if NOISE_SUFFIXES.iter().any(|suffix| path.ends_with(suffix)) {
-        return false;
-    }
-    WITNESS_PREFIXES
-        .iter()
-        .any(|prefix| path.starts_with(prefix))
+    witness_tier(path).is_some()
 }
 
-/// Choose up to `budget` files to stat, best evidence first.
+/// Choose up to `budget` files to stat, all from the strongest tier present.
 ///
-/// Binaries come before libraries because running a program is a much stronger
-/// signal than a library being pulled in by something else. Within a group the
-/// original database order is kept so that the choice is deterministic.
+/// Within a tier the database order is kept, so the choice is deterministic.
 pub fn witnesses(files: &[String], budget: usize) -> Vec<&str> {
     if budget == 0 {
         return Vec::new();
     }
 
-    let mut ranked: Vec<(usize, &str)> = files
+    let ranked: Vec<(usize, &str)> = files
         .iter()
         .map(String::as_str)
-        .filter(|path| is_witness(path))
-        .map(|path| (rank(path), path))
+        .filter_map(|path| witness_tier(path).map(|tier| (tier, path)))
         .collect();
-    ranked.sort_by_key(|(rank, _path)| *rank);
+
+    let Some(best) = ranked.iter().map(|(tier, _path)| *tier).min() else {
+        return Vec::new();
+    };
 
     ranked
         .into_iter()
+        .filter(|(tier, _path)| *tier == best)
+        .map(|(_tier, path)| path)
         .take(budget)
-        .map(|(_rank, path)| path)
         .collect()
-}
-
-/// Lower is stronger evidence.
-fn rank(path: &str) -> usize {
-    for (position, prefix) in WITNESS_PREFIXES.iter().enumerate() {
-        if path.starts_with(prefix) {
-            return position;
-        }
-    }
-    WITNESS_PREFIXES.len()
 }
 
 /// An access time observed for one witness file.
@@ -209,7 +229,7 @@ fn has_option(options: &str, needle: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{atime_support, evaluate, is_witness, witnesses, Observation};
+    use super::{atime_support, evaluate, is_witness, witness_tier, witnesses, Observation};
     use crate::model::{AtimeSupport, UsageEvidence};
 
     #[test]
@@ -224,24 +244,73 @@ mod tests {
         assert!(!is_witness("usr/share/man/man1/rg.1.gz"));
         assert!(!is_witness("usr/share/doc/rg/README"));
         assert!(!is_witness("usr/share/locale/de/LC_MESSAGES/rg.mo"));
-        assert!(!is_witness("etc/rg.conf"));
         assert!(!is_witness("usr/include/foo.h"));
         assert!(!is_witness("usr/lib/pkgconfig/foo.pc"));
     }
 
     #[test]
-    fn binaries_outrank_libraries_within_the_budget() {
+    fn package_data_is_a_witness() {
+        // The largest packages on a desktop ship nothing but data — fonts,
+        // icon themes, a TeX distribution. Excluding all of usr/share left
+        // exactly those packages with no verdict.
+        assert!(is_witness("usr/share/fonts/noto/NotoSans-Regular.ttf"));
+        assert!(is_witness("usr/share/icons/Adwaita/index.theme"));
+        assert!(is_witness(
+            "usr/share/texmf-dist/tex/latex/base/article.cls"
+        ));
+    }
+
+    #[test]
+    fn tiers_run_from_executables_down_to_leftovers() {
+        assert_eq!(witness_tier("usr/bin/rg"), Some(0));
+        assert_eq!(witness_tier("usr/lib/libfoo.so.1"), Some(1));
+        assert_eq!(witness_tier("usr/share/fonts/x.ttf"), Some(2));
+        assert_eq!(witness_tier("etc/rg.conf"), Some(3));
+        assert_eq!(witness_tier("usr/share/man/man1/rg.1"), None);
+    }
+
+    #[test]
+    fn only_the_strongest_tier_present_is_used() {
+        // A stray read of a data file must not vouch for a binary that has
+        // never run, so the tiers are not mixed.
         let files = vec![
             "usr/lib/libfoo.so".to_owned(),
             "usr/share/man/man1/x.1".to_owned(),
+            "usr/share/foo/data.bin".to_owned(),
             "usr/bin/foo".to_owned(),
         ];
+        assert_eq!(witnesses(&files, 5), vec!["usr/bin/foo"]);
         assert_eq!(witnesses(&files, 1), vec!["usr/bin/foo"]);
-        assert_eq!(
-            witnesses(&files, 5),
-            vec!["usr/bin/foo", "usr/lib/libfoo.so"]
-        );
         assert!(witnesses(&files, 0).is_empty());
+    }
+
+    #[test]
+    fn a_package_falls_back_to_the_best_tier_it_actually_ships() {
+        let libraries = vec![
+            "usr/lib/libfoo.so".to_owned(),
+            "usr/share/foo/data.bin".to_owned(),
+        ];
+        assert_eq!(witnesses(&libraries, 5), vec!["usr/lib/libfoo.so"]);
+
+        let data_only = vec![
+            "usr/share/man/man1/x.1".to_owned(),
+            "usr/share/fonts/x.ttf".to_owned(),
+        ];
+        assert_eq!(witnesses(&data_only, 5), vec!["usr/share/fonts/x.ttf"]);
+
+        let leftovers = vec!["etc/foo.conf".to_owned()];
+        assert_eq!(witnesses(&leftovers, 5), vec!["etc/foo.conf"]);
+    }
+
+    #[test]
+    fn only_a_package_with_no_usable_file_has_no_witness() {
+        let nothing = vec![
+            "usr/share/man/man1/x.1".to_owned(),
+            "usr/share/doc/foo/README".to_owned(),
+            "usr/include/foo.h".to_owned(),
+        ];
+        assert!(witnesses(&nothing, 5).is_empty());
+        assert!(witnesses(&[], 5).is_empty());
     }
 
     #[test]

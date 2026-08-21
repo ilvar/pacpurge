@@ -30,8 +30,19 @@ by the real figure. The column turns green when a package drags others along.
 **`last used` is real evidence.** Every file carries an access time. Arch
 mounts filesystems `relatime` by default, so that timestamp updates at most
 once a day on read — useless for profiling, exactly right for *"has anything
-touched this in the last six months?"*. pacpurge stats each package's
-binaries and shared libraries and reports the newest.
+touched this in the last six months?"*.
+
+Each package is judged by the strongest evidence it actually ships, in tiers:
+its executables if it has any, otherwise its shared libraries, otherwise the
+data it installs — fonts, icon themes, a TeX tree. That last tier matters more
+than it sounds: the biggest packages on a desktop ship no binary at all, so
+judging only by binaries left exactly the packages you most want to inspect
+with a blank column. The tiers are not mixed, so a stray read of one data file
+cannot vouch for a binary that has never run.
+
+Documentation is the one thing excluded outright. An indexer reading a man
+page says nothing about whether you use the software, so a package that ships
+*only* documentation honestly reports `n/a` rather than guessing.
 
 Two things it refuses to fudge:
 
@@ -94,10 +105,18 @@ Beyond that:
 
 ## Install
 
+Straight from the repository, no clone needed:
+
+```bash
+cargo install --git https://github.com/ilvar/pacpurge --locked
+```
+
+Or from a checkout:
+
 ```bash
 git clone https://github.com/ilvar/pacpurge
 cd pacpurge
-cargo install --path .
+cargo install --path . --locked
 ```
 
 Or build the static binary directly:
@@ -105,6 +124,9 @@ Or build the static binary directly:
 ```bash
 cargo release-small     # x86_64-unknown-linux-musl, ~900 KB, no runtime deps
 ```
+
+`cargo install` puts the binary in `~/.cargo/bin`, which needs to be on your
+`PATH`.
 
 pacpurge needs no privileges to scan. It asks for `sudo` only at the moment it
 runs a command that requires it.
@@ -121,8 +143,10 @@ pacpurge --json | jq .summary  # the whole analysis as one JSON document
 Useful options:
 
 ```
---top <N>          probe access times for the N largest packages (default 200).
-                   AUR packages and orphans are always probed regardless of
+--top <N>          probe access times for only the N largest packages.
+                   Defaults to 0, meaning every package — a full probe of a
+                   2000-package system costs about a third of a second. When
+                   set, AUR packages and orphans are probed regardless of
                    size, because an unused 12 MiB AUR build is a better
                    candidate than a 400 MiB toolchain in daily use.
 --stale-days <N>   days without a read before a package counts as stale (180)
@@ -204,7 +228,9 @@ See [`AGENTS.md`](AGENTS.md) for the project-specific rules.
 - **Access times are a proxy, not a log.** A library loaded by something else
   reads as used even if you never invoked the package's own binary. The signal
   is strong in the negative direction — `never` is reliable — and weaker in
-  the positive one.
+  the positive one. Anything that walks the whole filesystem — a backup, an
+  indexer, `updatedb` — can also refresh access times wholesale; if every
+  package suddenly reads as used on the same day, that is what happened.
 - **Dependency cycles are not swept up.** Two packages that require each other
   keep each other alive. pacman's own `-Rns` and `-Qdt` behave the same way,
   and reporting space that pacman will not actually reclaim would be worse

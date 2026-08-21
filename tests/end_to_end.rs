@@ -267,6 +267,73 @@ fn access_times_separate_used_packages_from_forgotten_ones() {
 }
 
 #[test]
+fn a_data_only_package_still_gets_a_verdict() {
+    // The largest packages on a desktop — a TeX distribution, a font family,
+    // an icon theme — ship no binary and no library at all. Judging them by
+    // their data files is the difference between a useful column and an empty
+    // one.
+    let root = fixture_root("data-only");
+    install(
+        &root,
+        &Fixture {
+            name: "big-font",
+            version: "1-1",
+            size: 400_000_000,
+            installed: 300,
+            reason: "0",
+            depends: &[],
+            files: &[
+                "usr/share/fonts/big/Regular.ttf",
+                "usr/share/man/man1/big-font.1",
+            ],
+            last_read: Some(2),
+        },
+    );
+
+    let inventory = scan::scan(&config(&root)).expect("the scan should succeed");
+    let entry = inventory.get("big-font").expect("big-font is installed");
+
+    if !inventory.atime_support.is_meaningful() {
+        return;
+    }
+    match &entry.facts.usage {
+        UsageEvidence::Used { at: _, witness } => {
+            assert_eq!(witness, "usr/share/fonts/big/Regular.ttf");
+        }
+        other => panic!("expected a verdict from the font file, got {other:?}"),
+    }
+}
+
+#[test]
+fn every_package_is_probed_by_default() {
+    let root = build_root("probe-all");
+    let inventory = scan::scan(&config(&root)).expect("the scan should succeed");
+
+    assert_eq!(inventory.probed, inventory.entries.len());
+    assert!(
+        !inventory
+            .entries
+            .iter()
+            .any(|entry| entry.facts.usage == UsageEvidence::NotProbed),
+        "a bounded probe leaves most of the table with no verdict"
+    );
+}
+
+#[test]
+fn top_still_bounds_the_probe_when_asked_for() {
+    let root = build_root("probe-bounded");
+    let bounded = Config {
+        probe_top: 1,
+        ..config(&root)
+    };
+    let inventory = scan::scan(&bounded).expect("the scan should succeed");
+
+    // One by size, plus the orphans and foreign packages that are always
+    // included, but not the whole set.
+    assert!(inventory.probed < inventory.entries.len());
+}
+
+#[test]
 fn a_manual_page_is_never_taken_as_evidence_of_use() {
     let root = fixture_root("witness-choice");
     install(
@@ -286,6 +353,8 @@ fn a_manual_page_is_never_taken_as_evidence_of_use() {
 
     let inventory = scan::scan(&config(&root)).expect("the scan should succeed");
     let entry = inventory.get("docs-only").expect("docs-only is installed");
+    // Documentation is the one thing still excluded outright: an indexer
+    // reading a man page says nothing about whether the software is used.
     assert_eq!(entry.facts.usage, UsageEvidence::NoWitness);
 }
 

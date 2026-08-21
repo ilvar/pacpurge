@@ -35,6 +35,7 @@ pub struct Options {
     /// Pacman database directory, when overridden.
     pub db_path: Option<PathBuf>,
     /// How many of the largest packages to probe for access times.
+    /// Zero, the default, means all of them.
     pub probe_top: usize,
     /// Days without a read before a package counts as stale.
     pub stale_days: i64,
@@ -54,7 +55,7 @@ impl Default for Options {
             mode: Mode::Interactive,
             root: PathBuf::from("/"),
             db_path: None,
-            probe_top: 200,
+            probe_top: 0,
             stale_days: 180,
             probe_usage: true,
             measure_directories: true,
@@ -127,9 +128,12 @@ MODES
 SCAN OPTIONS
   --root <PATH>      analyse an alternate filesystem root (default: /)
   --db-path <PATH>   pacman database directory (default: from pacman.conf)
-  --top <N>          probe access times for the N largest packages
-                     (default: 200; AUR packages and orphans are always
-                     probed regardless of size)
+  --top <N>          probe access times for only the N largest packages.
+                     The default is 0, meaning every package: a full probe of
+                     a 2000-package system costs about a third of a second,
+                     and a bounded one leaves most of the table blank. When
+                     set, AUR packages and orphans are probed regardless of
+                     size.
   --stale-days <N>   days without a read before a package counts as stale
                      (default: 180)
   --no-usage         skip access-time probing entirely
@@ -151,9 +155,17 @@ SEARCH AND FILTERS
 LAST-USE DATA
   Package files carry an access time, which Arch updates at most once a day
   under the default `relatime` mount option. That is precise enough to tell
-  software you use from software you installed once and forgot. Where a
-  filesystem is mounted `noatime` the timestamps are frozen, and pacpurge
-  disables the column rather than report a number that means nothing.
+  software you use from software you installed once and forgot.
+
+  Each package is judged by the strongest evidence it ships: its executables,
+  or failing that its libraries, or failing that the data it installs. A font
+  family or a TeX distribution ships no binary at all, so judging only by
+  binaries would leave the biggest packages on the system with no verdict.
+  Documentation is excluded: an indexer reading a man page says nothing about
+  whether the software is used.
+
+  Where a filesystem is mounted `noatime` the timestamps are frozen, and
+  pacpurge disables the column rather than report a number that means nothing.
 ";
 
 /// Parse an argument list, excluding the program name.

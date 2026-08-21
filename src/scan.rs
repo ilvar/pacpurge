@@ -62,6 +62,10 @@ pub struct Config {
     /// Home directory whose caches should be measured.
     pub home: Option<PathBuf>,
     /// How many of the largest packages to probe for access times.
+    ///
+    /// Zero means every package, which is the default: probing a two thousand
+    /// package system costs a third of a second, and a bounded probe leaves
+    /// most of the table with no verdict at all.
     pub probe_top: usize,
     /// How many files to stat per package.
     pub witness_budget: usize,
@@ -81,7 +85,7 @@ impl Default for Config {
             db_path: PathBuf::from("/var/lib/pacman"),
             cache_dirs: vec![PathBuf::from("/var/cache/pacman/pkg")],
             home: None,
-            probe_top: 200,
+            probe_top: 0,
             witness_budget: 24,
             probe_usage: true,
             measure_directories: true,
@@ -335,15 +339,20 @@ fn detect_atime_support(config: &Config) -> AtimeSupport {
 
 /// Pick which packages are worth the cost of an access-time probe.
 ///
-/// The largest packages are the point of the exercise, but foreign packages
-/// and orphans are included regardless of size: an unused 12 MiB AUR build is
-/// a better removal candidate than a 400 MiB toolchain in daily use.
+/// Everything, unless `probe_top` bounds it. When it does, the largest
+/// packages are the point of the exercise, but foreign packages and orphans
+/// are included regardless of size: an unused 12 MiB AUR build is a better
+/// removal candidate than a 400 MiB toolchain in daily use.
 fn choose_probe_targets(
     packages: &[Package],
     graph: &Graph<'_>,
     origins: &BTreeMap<String, Origin>,
     config: &Config,
 ) -> Vec<usize> {
+    if config.probe_top == 0 {
+        return (0..packages.len()).collect();
+    }
+
     let mut by_size: Vec<usize> = (0..packages.len()).collect();
     by_size.sort_by_key(|position| {
         std::cmp::Reverse(

@@ -77,6 +77,14 @@ manager.
 - **Never report a last-use verdict without evidence for it.** `noatime`
   freezes access times; the column is disabled rather than filled with stale
   dates. An access time at install time means *never used*, not *used then*.
+- **Judge a package by the strongest tier it ships, and do not mix tiers.**
+  Executables, then libraries, then installed data. Narrowing the witness set
+  to binaries and libraries left every font, icon theme and TeX package — the
+  largest things on a desktop — with no verdict at all, which is the failure
+  mode to watch for when touching `usage::WITNESS_TIERS`. Taking the newest
+  access time across mixed tiers is the other failure mode: a stray read of
+  one data file would vouch for a binary that has never run. Documentation
+  stays excluded outright; an indexer reading a man page is not evidence.
 - **Never claim space pacman will not actually free.** The cascade simulation
   mirrors `pacman -Rns`: explicitly installed packages are not swept up,
   protected ones are not swept up, and dependency cycles are left alone
