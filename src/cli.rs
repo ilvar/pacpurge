@@ -13,6 +13,8 @@ use std::path::PathBuf;
 pub enum Mode {
     /// Run the interactive terminal interface.
     Interactive,
+    /// Serve the analysis to a browser on loopback.
+    Web,
     /// Print the analysis as one JSON document and exit.
     Json,
     /// Print a plain-text table and exit.
@@ -49,6 +51,8 @@ pub struct Options {
     pub dry_run: bool,
     /// Rows to print in `--list` mode.
     pub limit: usize,
+    /// Port for `--web`. Zero means "whatever is free".
+    pub port: u16,
 }
 
 impl Default for Options {
@@ -63,6 +67,7 @@ impl Default for Options {
             measure_directories: true,
             dry_run: false,
             limit: 40,
+            port: 8080,
         }
     }
 }
@@ -121,6 +126,10 @@ and when its files were last read.
 
 MODES
   (default)          interactive terminal interface
+  --web              serve the analysis to a browser on 127.0.0.1 and keep
+                     serving until interrupted. The page is read-only:
+                     removals stay in the terminal interface, where pacman
+                     owns the confirmation prompt.
   --list             print the package table and exit
   --clean            print the non-package cleanup targets and exit
   --diagnose         explain what the last-use probe can see on this system:
@@ -144,6 +153,12 @@ SCAN OPTIONS
   --no-usage         skip access-time probing entirely
   --quick            skip directory size measurement, which is the slow part
   --limit <N>        rows to print in --list mode (default: 40)
+  --port <N>         port for --web (default: 8080). 0 takes whatever port is
+                     free and prints it. The listener is bound to loopback and
+                     is not configurable: reaching it from another machine is
+                     a job for `ssh -L`, which authenticates.
+
+Options may be written `--option value` or `--option=value`.
 
 SAFETY
   --dry-run          never execute anything; print the commands instead
@@ -173,10 +188,33 @@ LAST-USE DATA
   pacpurge disables the column rather than report a number that means nothing.
 ";
 
+/// Split `--option=value` into two arguments.
+///
+/// Long options are conventionally written either way, and a person who types
+/// `--port=8080` should not have to discover which of the two this program
+/// wanted. Doing it in one pass up front keeps the parser itself a single
+/// match over option names.
+fn expand(arguments: &[String]) -> Vec<String> {
+    let mut expanded = Vec::new();
+
+    for argument in arguments {
+        match argument.split_once('=') {
+            Some((name, value)) if name.starts_with("--") && name.len() > 2 => {
+                expanded.push(name.to_owned());
+                expanded.push(value.to_owned());
+            }
+            Some(_) | None => expanded.push(argument.clone()),
+        }
+    }
+
+    expanded
+}
+
 /// Parse an argument list, excluding the program name.
 pub fn parse(arguments: &[String]) -> Result<Options, Error> {
     let mut options = Options::default();
-    let mut iterator = arguments.iter();
+    let expanded = expand(arguments);
+    let mut iterator = expanded.iter();
 
     while let Some(argument) = iterator.next() {
         let mut value_for = |option: &str| -> Result<String, Error> {
@@ -188,6 +226,7 @@ pub fn parse(arguments: &[String]) -> Result<Options, Error> {
         match argument.as_str() {
             "-h" | "--help" | "help" => options.mode = Mode::Help,
             "-V" | "--version" => options.mode = Mode::Version,
+            "--web" => options.mode = Mode::Web,
             "--json" => options.mode = Mode::Json,
             "--list" => options.mode = Mode::List,
             "--clean" => options.mode = Mode::Clean,
@@ -199,6 +238,13 @@ pub fn parse(arguments: &[String]) -> Result<Options, Error> {
             "--db-path" => options.db_path = Some(PathBuf::from(value_for("--db-path")?)),
             "--top" => options.probe_top = number("--top", &value_for("--top")?)?,
             "--limit" => options.limit = number("--limit", &value_for("--limit")?)?,
+            "--port" => {
+                let raw = value_for("--port")?;
+                options.port = raw.parse::<u16>().map_err(|_error| Error::BadNumber {
+                    option: "--port".to_owned(),
+                    value: raw.clone(),
+                })?;
+            }
             "--stale-days" => {
                 let raw = value_for("--stale-days")?;
                 options.stale_days = raw.parse::<i64>().map_err(|_error| Error::BadNumber {
@@ -246,6 +292,7 @@ mod tests {
 
     #[test]
     fn modes_are_selected_by_flag() {
+        assert_eq!(parse(&arguments(&["--web"])).unwrap().mode, Mode::Web);
         assert_eq!(parse(&arguments(&["--json"])).unwrap().mode, Mode::Json);
         assert_eq!(parse(&arguments(&["--list"])).unwrap().mode, Mode::List);
         assert_eq!(parse(&arguments(&["--clean"])).unwrap().mode, Mode::Clean);
@@ -284,6 +331,47 @@ mod tests {
     }
 
     #[test]
+    fn a_port_defaults_to_8080_and_can_be_set_either_way() {
+        assert_eq!(parse(&[]).unwrap().port, 8080);
+        assert_eq!(parse(&arguments(&["--port", "9000"])).unwrap().port, 9000);
+        assert_eq!(parse(&arguments(&["--port=9000"])).unwrap().port, 9000);
+        // Zero is meaningful: it asks the kernel for a free port.
+        assert_eq!(parse(&arguments(&["--port=0"])).unwrap().port, 0);
+    }
+
+    #[test]
+    fn a_port_outside_the_range_is_an_error() {
+        assert_eq!(
+            parse(&arguments(&["--port", "70000"])),
+            Err(Error::BadNumber {
+                option: "--port".to_owned(),
+                value: "70000".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn the_joined_form_works_for_every_option_that_takes_a_value() {
+        let options = parse(&arguments(&[
+            "--root=/mnt/arch",
+            "--top=50",
+            "--stale-days=30",
+            "--limit=5",
+        ]))
+        .unwrap();
+        assert_eq!(options.root, PathBuf::from("/mnt/arch"));
+        assert_eq!(options.probe_top, 50);
+        assert_eq!(options.stale_days, 30);
+        assert_eq!(options.limit, 5);
+    }
+
+    #[test]
+    fn a_value_containing_an_equals_sign_survives_the_split() {
+        let options = parse(&arguments(&["--root=/mnt/odd=name"])).unwrap();
+        assert_eq!(options.root, PathBuf::from("/mnt/odd=name"));
+    }
+
+    #[test]
     fn an_unknown_option_is_an_error() {
         assert_eq!(
             parse(&arguments(&["--delete-everything"])),
@@ -317,6 +405,8 @@ mod tests {
     #[test]
     fn the_help_text_documents_every_option() {
         for option in [
+            "--web",
+            "--port",
             "--root",
             "--db-path",
             "--top",

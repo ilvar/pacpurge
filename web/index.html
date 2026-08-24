@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>pacpurge</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>pacpurge</h1>
+      <p id="caveat" hidden></p>
+    </header>
+
+    <section id="summary" class="tiles"></section>
+
+    <section class="controls">
+      <input id="search" type="search" placeholder="filter by name or description" autocomplete="off" />
+      <label><input type="checkbox" id="only-orphans" /> orphans</label>
+      <label><input type="checkbox" id="only-foreign" /> AUR / foreign</label>
+      <label><input type="checkbox" id="only-unused" /> never used</label>
+      <button id="rescan" type="button">rescan</button>
+    </section>
+
+    <p id="status">scanning…</p>
+
+    <div class="scroller">
+      <table id="packages">
+        <thead>
+          <tr>
+            <th data-sort="name">package</th>
+            <th class="num" data-sort="size">size</th>
+            <th class="num" data-sort="reclaimable">frees</th>
+            <th data-sort="reason">reason</th>
+            <th data-sort="origin">origin</th>
+            <th data-sort="usage">last use</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <footer>
+      <p>
+        Read-only. pacpurge never removes a package from here — removals go
+        through <code>pacman -Rns</code> in the terminal interface, which runs
+        its own checks and its own confirmation.
+      </p>
+    </footer>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

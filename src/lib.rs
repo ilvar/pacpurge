@@ -31,3 +31,4 @@ pub mod report;
 pub mod scan;
 pub mod ui;
 pub mod usage;
+pub mod web;

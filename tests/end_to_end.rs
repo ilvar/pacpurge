@@ -335,6 +335,24 @@ fn top_still_bounds_the_probe_when_asked_for() {
 }
 
 #[test]
+fn a_root_with_no_sync_databases_is_never_reported_as_aur_built() {
+    let root = build_root("origins-unsynced");
+    let inventory = scan::scan(&config(&root)).expect("the scan should succeed");
+
+    // The fixture root has no sync databases, so nothing can be said about
+    // where its packages came from. Foreign is inferred from absence, and
+    // absence means nothing when the repository lists were never read.
+    for entry in &inventory.entries {
+        assert_eq!(
+            entry.facts.origin,
+            Origin::Unknown,
+            "{} was given an origin the scan cannot know",
+            entry.package.name
+        );
+    }
+}
+
+#[test]
 fn a_manual_page_is_never_taken_as_evidence_of_use() {
     let root = fixture_root("witness-choice");
     install(
