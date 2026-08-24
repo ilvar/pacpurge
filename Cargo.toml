@@ -1,6 +1,6 @@
 [package]
 name = "pacpurge"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.97.1"
 description = "A TUI for finding and reclaiming space from unused pacman and AUR packages on Arch Linux"
