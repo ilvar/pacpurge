@@ -223,16 +223,20 @@ fn evaluate_atime(
     install_date: Option<i64>,
     support: AtimeSupport,
 ) -> UsageEvidence {
-    if !support.is_meaningful() {
-        return UsageEvidence::AtimeDisabled;
-    }
-
+    // Emptiness is decided before the mount options are consulted. A package
+    // that ships nothing worth stat-ing has no witness on any filesystem, and
+    // answering `AtimeDisabled` there would promise that a remount produces a
+    // verdict this package can never have.
     let Some(best) = observations
         .iter()
         .max_by_key(|observation| observation.atime)
     else {
         return UsageEvidence::NoWitness;
     };
+
+    if !support.is_meaningful() {
+        return UsageEvidence::AtimeDisabled;
+    }
 
     let threshold = install_date.map(|date| date.saturating_add(INSTALL_GRACE));
     match threshold {
@@ -451,6 +455,16 @@ mod tests {
     fn no_witnesses_is_reported_as_such() {
         assert_eq!(
             evaluate(&[], None, Some(1_000), AtimeSupport::Relatime),
+            UsageEvidence::NoWitness
+        );
+    }
+
+    #[test]
+    fn a_package_with_nothing_to_stat_has_no_witness_even_on_noatime() {
+        // `AtimeDisabled` means "remount and I could tell you". For a package
+        // that ships no witness file there is nothing to tell, on any mount.
+        assert_eq!(
+            evaluate(&[], None, Some(1_000), AtimeSupport::Disabled),
             UsageEvidence::NoWitness
         );
     }

@@ -211,7 +211,7 @@ pub fn scan(config: &Config) -> Result<Inventory, Error> {
     packages.sort_by(|left, right| left.name.cmp(&right.name));
 
     let graph = Graph::build(&packages);
-    let origins = resolve_origins(&packages, &mut warnings);
+    let origins = resolve_origins(&packages, config, &mut warnings);
     let now = capability::now();
 
     let atime_support = if config.probe_usage {
@@ -302,7 +302,11 @@ pub fn scan(config: &Config) -> Result<Inventory, Error> {
 /// package. Anything absent from that list is foreign: an AUR build or a
 /// locally built package. Without pacman on `PATH` the question is left open
 /// rather than guessed at.
-fn resolve_origins(packages: &[Package], warnings: &mut Vec<String>) -> BTreeMap<String, Origin> {
+fn resolve_origins(
+    packages: &[Package],
+    config: &Config,
+    warnings: &mut Vec<String>,
+) -> BTreeMap<String, Origin> {
     let mut origins = BTreeMap::new();
 
     if !capability::has_program("pacman") {
@@ -313,7 +317,16 @@ fn resolve_origins(packages: &[Package], warnings: &mut Vec<String>) -> BTreeMap
         return origins;
     }
 
-    let listing = match capability::run_captured("pacman", &["-Sl".to_owned()]) {
+    // The repositories that matter are the scanned root's, not this machine's.
+    // With `--root` pointing elsewhere the host's repository list would name
+    // packages the target root never had, and miss the ones it does.
+    let arguments = vec![
+        "-Sl".to_owned(),
+        "--dbpath".to_owned(),
+        config.db_path.to_string_lossy().into_owned(),
+    ];
+
+    let listing = match capability::run_captured("pacman", &arguments) {
         Ok(output) if output.ok() => output.stdout,
         Ok(output) => {
             warnings.push(format!(
@@ -334,6 +347,18 @@ fn resolve_origins(packages: &[Package], warnings: &mut Vec<String>) -> BTreeMap
             continue;
         };
         origins.insert(name.to_owned(), Origin::Repository(repository.to_owned()));
+    }
+
+    // Foreign is inferred from absence, so it is only safe to infer once the
+    // repository lists have actually been read. An unsynced database lists no
+    // packages at all, and calling the entire system AUR-built on that basis
+    // would be the loudest possible way to report knowing nothing.
+    if origins.is_empty() {
+        warnings.push(
+            "no sync databases were readable, so repository membership and AUR detection are              unavailable. `pacman -Sy` populates them."
+                .to_owned(),
+        );
+        return origins;
     }
 
     for package in packages {
