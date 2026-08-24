@@ -65,6 +65,22 @@ manager.
 - **`app.rs` performs nothing.** `App::handle` returns an `Action` and `main`
   decides what to do about it. Running a command means leaving the alternate
   screen, which only `main` may do.
+- **`web.rs` decides, `capability` connects, `main` scans.** The `--web`
+  server is split so the routing is pure: `web.rs` turns a request head into a
+  `Route` and builds response bytes without touching a socket, `capability`
+  owns the listener and the stream, and the scan stays in `main` because it is
+  the only part allowed to reach the filesystem. That split is what lets the
+  routing be unit-tested without binding a port, and `tests/http.rs` covers the
+  rest against a real one.
+- **The server binds loopback and answers to two names.** There is no flag to
+  bind elsewhere. It serves an inventory of everything installed, `ssh -L` is
+  the authenticated way to reach it remotely, and the `Host` check is what
+  stops a page on the internet reading it through a name that resolves to
+  127.0.0.1. Both are load-bearing; neither is a configuration option.
+- **The page performs nothing, for the same reason a bundled GUI would not
+  have.** `GET` is the only verb answered. Removals belong to `pacman -Rns`
+  under the terminal interface, where its checks and its prompt are what the
+  user sees.
 - **`keys.rs` exists so the state machine never sees a raw key.** It is also
   the one file allowed a catch-all match arm, because `KeyCode` is not ours
   and gains variants that this program has no opinion about.

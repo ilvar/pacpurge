@@ -21,6 +21,7 @@ use pacpurge::plan::Step;
 use pacpurge::report;
 use pacpurge::scan::{self, Config};
 use pacpurge::ui;
+use pacpurge::web;
 
 use ratatui::crossterm::event::{self, Event};
 
@@ -85,6 +86,7 @@ fn run(options: &Options) -> Result<process::ExitCode, String> {
             print!("{}", report::diagnose(&inventory));
             Ok(process::ExitCode::SUCCESS)
         }
+        Mode::Web => serve(options),
         Mode::Interactive => interactive(options),
     }
 }
@@ -108,6 +110,59 @@ fn view_for(options: &Options) -> View {
         stale_days: options.stale_days,
         ..View::default()
     }
+}
+
+/// Serve the analysis to a browser until interrupted.
+///
+/// The scan runs per request rather than once at startup, so the reload button
+/// reports the system as it is now — the same reason the terminal interface
+/// rescans after a removal instead of subtracting what it expected to free.
+fn serve(options: &Options) -> Result<process::ExitCode, String> {
+    let listener = capability::listen(options.port)
+        .map_err(|error| format!("could not listen on port {}: {error}", options.port))?;
+    let port = listener
+        .port()
+        .map_err(|error| format!("could not read back the bound port: {error}"))?;
+
+    eprintln!("pacpurge: serving {} — Ctrl-C to stop", web::address(port));
+
+    let respond = |head: &str| -> Vec<u8> {
+        let route = web::route(head, port);
+        if let Some(canned) = web::canned(route) {
+            return web::response(canned.status, canned.content_type, canned.body.as_bytes());
+        }
+
+        match inventory_json(options) {
+            Ok(document) => web::response(
+                "200 OK",
+                "application/json; charset=utf-8",
+                document.as_bytes(),
+            ),
+            Err(message) => {
+                eprintln!("pacpurge: {message}");
+                web::response(
+                    "500 Internal Server Error",
+                    "text/plain; charset=utf-8",
+                    message.as_bytes(),
+                )
+            }
+        }
+    };
+
+    loop {
+        // One bad client is not a reason to stop serving the good one. A
+        // browser that navigates away mid-scan closes the socket, and the
+        // write that fails is the only trace of it worth printing.
+        if let Err(error) = capability::serve_next(&listener, &respond, web::MAX_HEAD) {
+            eprintln!("pacpurge: dropped a connection: {error}");
+        }
+    }
+}
+
+/// Scan, and encode the result as the document the page reads.
+fn inventory_json(options: &Options) -> Result<String, String> {
+    let inventory = collect(options)?;
+    report::json(&inventory).map_err(|error| format!("could not encode the report: {error}"))
 }
 
 /// Run the terminal interface.

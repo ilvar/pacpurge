@@ -159,11 +159,28 @@ runs a command that requires it.
 
 ```bash
 pacpurge                       # the interactive interface
+pacpurge --web                 # serve the analysis to a browser (read-only)
+pacpurge --web --port=9000     # ... on a port of your choosing
 pacpurge --list                # print the package table and exit
 pacpurge --clean               # print the reclaim targets and exit
 pacpurge --diagnose            # explain what the last-use probe can see here
 pacpurge --json | jq .summary  # the whole analysis as one JSON document
 ```
+
+`--web` binds `127.0.0.1` and nothing else. The page it serves is an
+inventory of everything installed on the machine, which is worth something to
+anyone fingerprinting it, so there is no flag to publish it on a network
+interface: reach it from another machine with `ssh -L 8080:127.0.0.1:8080`,
+which authenticates. The server also checks the `Host` header and answers only
+to `localhost` and `127.0.0.1`, so a page elsewhere on the internet cannot
+point a script at a name that resolves to loopback and read the reply.
+
+It costs no dependencies. The page is three static files compiled into the
+binary and served by about a hundred lines over `std::net`, because the
+alternative — linking a GUI toolkit — means asking someone to install a
+webview or a widget set. On this machine `webkit2gtk-4.1` is 133 MiB and
+`gtk4` is 51 MiB, which is a lot of disk to spend on a program for reclaiming
+disk.
 
 Useful options:
 

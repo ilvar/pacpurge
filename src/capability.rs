@@ -67,10 +67,12 @@ mod effects {
     use std::collections::BTreeSet;
     use std::fs;
     use std::io;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::os::unix::fs::MetadataExt;
     use std::path::{Path, PathBuf};
     use std::process;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use super::{Entry, Output, Stat, Usage};
 
@@ -343,6 +345,73 @@ mod effects {
         std::env::var_os("HOME").map(PathBuf::from)
     }
 
+    /// A bound TCP socket, listening for the `--web` interface.
+    pub struct Listener {
+        /// The socket itself.
+        inner: TcpListener,
+    }
+
+    impl Listener {
+        /// The port actually bound, which differs from the port requested when
+        /// that was `0` and the kernel chose.
+        pub fn port(&self) -> io::Result<u16> {
+            Ok(self.inner.local_addr()?.port())
+        }
+    }
+
+    /// Bind a listener on loopback.
+    ///
+    /// The address is not configurable, and that is the point: this serves an
+    /// inventory of everything installed on the machine, which is worth
+    /// something to somebody fingerprinting it. Reaching it from another host
+    /// is a job for `ssh -L`, which authenticates, rather than for a flag that
+    /// does not.
+    pub fn listen(port: u16) -> io::Result<Listener> {
+        Ok(Listener {
+            inner: TcpListener::bind(("127.0.0.1", port))?,
+        })
+    }
+
+    /// Accept one connection, read its request head, and write what `respond`
+    /// makes of it.
+    ///
+    /// Connections are served one at a time. The client is a single browser on
+    /// the same machine, and a scan it has to wait for is a scan the terminal
+    /// interface would have made it wait for too.
+    pub fn serve_next(
+        listener: &Listener,
+        respond: &dyn Fn(&str) -> Vec<u8>,
+        head_limit: usize,
+    ) -> io::Result<()> {
+        let (mut stream, _peer) = listener.inner.accept()?;
+
+        // A client that opens a socket and says nothing must not be able to
+        // stop the server answering anyone else.
+        let patience = Some(Duration::from_secs(5));
+        stream.set_read_timeout(patience)?;
+        stream.set_write_timeout(patience)?;
+
+        let mut head: Vec<u8> = Vec::new();
+        let mut buffer = [0u8; 1_024];
+        while head.len() < head_limit {
+            let read = stream.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            let Some(chunk) = buffer.get(..read) else {
+                break;
+            };
+            head.extend_from_slice(chunk);
+            if head.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+
+        let text = String::from_utf8_lossy(&head).into_owned();
+        stream.write_all(&respond(&text))?;
+        stream.flush()
+    }
+
     /// Current wall-clock time in Unix seconds.
     pub fn now() -> i64 {
         SystemTime::now()
@@ -354,6 +423,6 @@ mod effects {
 }
 
 pub use effects::{
-    effective_uid, exists, find_by_suffix, has_program, home_dir, list_dir, newest_mtime, now,
-    read_text, remove, run_captured, run_interactive, stat, tree_usage,
+    effective_uid, exists, find_by_suffix, has_program, home_dir, list_dir, listen, newest_mtime,
+    now, read_text, remove, run_captured, run_interactive, serve_next, stat, tree_usage, Listener,
 };
